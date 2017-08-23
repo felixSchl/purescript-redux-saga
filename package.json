@@ -1,0 +1,32 @@
+{
+  "name": "purescript-redux-saga",
+  "version": "0.0.0",
+  "description": "",
+  "main": "index.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "pulp test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/felixschl/purescript-redux-saga.git"
+  },
+  "keywords": [
+    "redux",
+    "saga",
+    "purescript"
+  ],
+  "author": "Felix Schlitter <felixschlitter@gmail.com>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/felixschl/purescript-redux-saga/issues"
+  },
+  "homepage": "https://github.com/felixschl/purescript-redux-saga#readme",
+  "devDependencies": {
+    "react": "^15.6.1",
+    "react-redux": "^5.0.6",
+    "redux": "^3.7.2"
+  }
+}
