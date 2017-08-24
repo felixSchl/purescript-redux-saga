@@ -1,4 +1,4 @@
-module Saga (
+module Redux.Saga (
     sagaMiddleware
   , Saga(Saga)
   , SagaPipe
@@ -156,7 +156,7 @@ instance monadEffSaga :: MonadEff eff (Saga eff action state) where
   liftEff eff = Saga $ liftEff $ unsafeCoerceEff eff
 
 instance monadAffSaga :: MonadAff eff (Saga eff action state) where
-  liftAff aff = Saga $ liftAff $ unsafeCoerceAff aff
+  liftAff aff = Saga $ lift $ lift $ unsafeCoerceAff aff
 
 type SagaTask = AVar Unit
 

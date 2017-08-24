@@ -20,7 +20,7 @@ import Control.Monad.Eff.Class (liftEff)
 import React.Redux as Redux
 import React.Redux (REDUX, ReduxReactClass')
 
-import Saga (Saga, takeEvery, take, fork, put, joinTask, sagaMiddleware)
+import Redux.Saga (Saga, takeEvery, take, fork, put, joinTask, sagaMiddleware)
 
 data Action = SearchChanged String
 type GlobalState = {}
