@@ -13,6 +13,10 @@
     "purescript-react-redux": "felixschl/purescript-react-redux#master",
     "purescript-pipes-aff": "v0.0.2"
   },
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/felixschl/purescript-redux-saga.git"
+  },
   "devDependencies": {
     "purescript-psci-support": "^3.0.0"
   }
