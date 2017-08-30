@@ -138,6 +138,12 @@ evaluateSaga api input saga = do
 newtype Saga eff action state a
   = Saga (SagaPipe (ref :: REF, avar :: AVAR | eff) action state a)
 
+unSaga
+  :: ∀ eff action state a
+   . Saga eff action state a
+  -> SagaPipe (ref :: REF, avar :: AVAR | eff) action state a
+unSaga (Saga saga) = saga
+
 instance applicativeSaga :: Applicative (Saga eff action state) where
   pure a = Saga $ pure a
 
@@ -148,7 +154,7 @@ instance applySaga :: Apply (Saga eff action state) where
   apply (Saga f) (Saga v) = Saga $ apply f v
 
 instance bindSaga :: Bind (Saga eff action state) where
-  bind (Saga v) f = Saga $ v >>= \v -> let (Saga saga) = f v in saga
+  bind (Saga v) f = Saga $ v >>= \v -> unSaga (f v)
 
 instance monadSaga :: Monad (Saga eff action state)
 
