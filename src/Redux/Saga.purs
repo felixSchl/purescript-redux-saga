@@ -1,6 +1,7 @@
 module Redux.Saga (
     sagaMiddleware
-  , Saga(Saga)
+  , Saga
+  , Saga'
   , SagaPipe
   , SagaVolatileState
   , takeEvery
@@ -9,6 +10,9 @@ module Redux.Saga (
   , put
   , select
   , joinTask
+  , channel
+  , inChannel
+  , emit
   ) where
 
 import Prelude
@@ -44,10 +48,52 @@ import Pipes ((>->))
 import Pipes.Core as P
 import Pipes as P
 
+type Channel eff a action state
+  = { volatile :: SagaVolatileState (ref :: REF, avar :: AVAR | eff) a action state
+    , output :: P.Output (ref :: REF, avar :: AVAR | eff) a
+    , input :: P.Input (ref :: REF, avar :: AVAR | eff) a
+    }
+
+emit
+  :: ∀ eff a action state
+   . a
+  -> Channel eff a action state
+  -> Aff (ref :: REF, avar :: AVAR | eff) Unit
+emit a { output } = void $ P.send output a
+
+channel
+  :: ∀ eff input action state a r
+   . Saga' (ref :: REF, avar :: AVAR | eff) input action state (Channel eff a action state)
+channel = Saga' $ unsafeCoerceSagaPipeEff do
+
+  { api }           <- unsafeCoerceSagaPipeEff $ lift ask
+  { output, input } <- liftAff $ P.spawn P.unbounded
+  idRef             <- liftEff $ newRef 0
+  threadsRef        <- liftEff $ newRef []
+
+  _ <- liftAff $ forkAff do
+    -- first exhaust the input pipe
+    P.runEffectRec $ P.for (P.fromInput input) \action -> do
+      threads <- liftEff $ readRef threadsRef
+      lift $ for_ threads \{ output } -> P.send output action
+
+    -- then wait for all threads to complete running
+    threads <- liftEff $ readRef threadsRef
+    for_ threads (peekVar <<< _.completionVar)
+
+  pure { output, input, volatile: { threadsRef, idRef, api } }
+
+inChannel
+  :: ∀ a input action state eff
+   . Channel eff a action state
+  -> Saga' (ref :: REF, avar :: AVAR | eff) a action state Unit
+  -> Saga' (ref :: REF, avar :: AVAR | eff) input action state Unit
+inChannel { volatile } saga = void $ liftAff $ attachSaga volatile saga
+
 takeEvery
-  :: ∀ action a state eff eff2
-   . (action -> Maybe (Saga eff action state Unit))
-  -> Saga eff2 action state SagaTask
+  :: ∀ input action state eff eff2
+   . (input -> Maybe (Saga' eff input action state Unit))
+  -> Saga' eff2 input action state SagaTask
 takeEvery f = fork $ loop
   where
   loop = do
@@ -55,46 +101,48 @@ takeEvery f = fork $ loop
     loop
 
 take
-  :: ∀ action a state eff
-   . (action -> Maybe (Saga eff action state Unit))
-  -> Saga eff action state Unit
-take f = Saga go
+  :: ∀ input action state eff
+   . (input -> Maybe (Saga' eff input action state Unit))
+  -> Saga' eff input action state Unit
+take f = Saga' go
   where
   go = map f P.await >>= case _ of
-    Just (Saga saga) -> saga
-    Nothing          -> go
+    Just (Saga' saga) -> saga
+    Nothing           -> go
 
 put
-  :: ∀ action a state eff
+  :: ∀ input action a state eff
    . action
-  -> Saga eff action state Unit
-put action = Saga $ P.yield action
+  -> Saga' eff input action state Unit
+put action = Saga' $ P.yield action
 
-joinTask :: ∀ eff action state. SagaTask -> Saga eff action state Unit
-joinTask v = Saga $ lift $ lift $ takeVar v
+joinTask
+  :: ∀ eff input action state. SagaTask
+  -> Saga' eff input action state Unit
+joinTask v = Saga' $ lift $ lift $ takeVar v
 
 fork
-  :: ∀ eff eff2 action state
-   . Saga eff action state Unit
-  -> Saga eff2 action state SagaTask
-fork saga = Saga do
+  :: ∀ eff eff2 input action state
+   . Saga' eff input action state Unit
+  -> Saga' eff2 input action state SagaTask
+fork saga = Saga' do
   lift do
     state <- ask
     lift $ attachSaga state saga
 
 select
-  :: ∀ eff action state
-   . SagaPipe eff action state state
+  :: ∀ eff input action state
+   . SagaPipe eff input action state state
 select = do
   { api } <- lift ask
   lift $ liftEff $ unsafeCoerceEff api.getState
 
 attachSaga
-  :: ∀ eff eff2 action state
-   . SagaVolatileState (ref :: REF, avar :: AVAR | eff) action state
-  -> Saga eff2 action state Unit
+  :: ∀ eff eff2 input action state
+   . SagaVolatileState (ref :: REF, avar :: AVAR | eff) input action state
+  -> Saga' eff2 input action state Unit
   -> Aff (ref :: REF, avar :: AVAR | eff) SagaTask
-attachSaga { threadsRef, idRef, api } (Saga saga) = do
+attachSaga { threadsRef, idRef, api } (Saga' saga) = do
   id <- liftEff $ modifyRef' idRef \value -> { state: value + 1, value }
   { output, input } <- P.spawn P.unbounded
   completionVar <- makeVar
@@ -104,7 +152,7 @@ attachSaga { threadsRef, idRef, api } (Saga saga) = do
         (liftEff $ modifyRef threadsRef (Array.filter ((_ /= id) <<< _.id))) do
         flip runReaderT { api, threadsRef, idRef }
           $ P.runEffectRec
-          $ P.for (P.fromInput input >-> unsafeCoerce saga) \action -> do
+          $ P.for (P.fromInput input >-> unsafeCoerceSagaPipeEff saga) \action -> do
               lift do
                 liftAff $ delay $ 0.0 # Milliseconds
                 liftEff $ unsafeCoerceEff $ api.dispatch action
@@ -115,7 +163,7 @@ evaluateSaga
   :: ∀ eff eff2 action state
    . Redux.MiddlewareAPI (avar :: AVAR, ref :: REF | eff) action state Unit
   -> P.Input (avar :: AVAR, ref :: REF | eff) action
-  -> Saga eff2 action state Unit
+  -> Saga' eff2 action action state Unit
   -> Aff (avar :: AVAR, ref :: REF | eff) Unit
 evaluateSaga api input saga = do
   idRef      <- liftEff $ newRef 0
@@ -135,53 +183,61 @@ evaluateSaga api input saga = do
   The type of a saga.
   It yields and produces actions.
  -}
-newtype Saga eff action state a
-  = Saga (SagaPipe (ref :: REF, avar :: AVAR | eff) action state a)
+type Saga eff action state a = Saga' eff action action state a
+
+newtype Saga' eff input action state a
+  = Saga' (SagaPipe (ref :: REF, avar :: AVAR | eff) input action state a)
 
 unSaga
-  :: ∀ eff action state a
-   . Saga eff action state a
-  -> SagaPipe (ref :: REF, avar :: AVAR | eff) action state a
-unSaga (Saga saga) = saga
+  :: ∀ eff input action state a
+   . Saga' eff input action state a
+  -> SagaPipe (ref :: REF, avar :: AVAR | eff) input action state a
+unSaga (Saga' saga) = saga
 
-instance applicativeSaga :: Applicative (Saga eff action state) where
-  pure a = Saga $ pure a
+instance applicativeSaga :: Applicative (Saga' eff input action state) where
+  pure a = Saga' $ pure a
 
-instance functorSaga :: Functor (Saga eff action state) where
-  map f (Saga x) = Saga $ map f x
+instance functorSaga :: Functor (Saga' eff input action state) where
+  map f (Saga' x) = Saga' $ map f x
 
-instance applySaga :: Apply (Saga eff action state) where
-  apply (Saga f) (Saga v) = Saga $ apply f v
+instance applySaga :: Apply (Saga' eff input action state) where
+  apply (Saga' f) (Saga' v) = Saga' $ apply f v
 
-instance bindSaga :: Bind (Saga eff action state) where
-  bind (Saga v) f = Saga $ v >>= \v -> unSaga (f v)
+instance bindSaga :: Bind (Saga' eff input action state) where
+  bind (Saga' v) f = Saga' $ v >>= \v -> unSaga (f v)
 
-instance monadSaga :: Monad (Saga eff action state)
+instance monadSaga :: Monad (Saga' eff input action state)
 
-instance monadEffSaga :: MonadEff eff (Saga eff action state) where
-  liftEff eff = Saga $ liftEff $ unsafeCoerceEff eff
+instance monadEffSaga :: MonadEff eff (Saga' eff input action state) where
+  liftEff eff = Saga' $ liftEff $ unsafeCoerceEff eff
 
-instance monadAffSaga :: MonadAff eff (Saga eff action state) where
-  liftAff aff = Saga $ lift $ lift $ unsafeCoerceAff aff
+instance monadAffSaga :: MonadAff eff (Saga' eff input action state) where
+  liftAff aff = Saga' $ lift $ lift $ unsafeCoerceAff aff
 
 type SagaTask = AVar Unit
 
-type SagaVolatileState eff action state
-  =  { threadsRef :: Ref (Array { id :: Int
-                                , output :: P.Output eff action
-                                , completionVar :: AVar Unit
-                                })
-     , idRef :: Ref Int
-     , api :: Redux.MiddlewareAPI eff action state Unit
-     }
+type SagaVolatileState eff input action state
+  = { threadsRef :: Ref (Array { id :: Int
+                               , output :: P.Output eff input
+                               , completionVar :: AVar Unit
+                               })
+    , idRef :: Ref Int
+    , api :: Redux.MiddlewareAPI eff action state Unit
+    }
 
-type SagaPipe eff action state a
+type SagaPipe eff input action state a
   = P.Pipe
+      input
       action
-      action
-      (ReaderT  (SagaVolatileState (ref :: REF, avar :: AVAR | eff) action state)
+      (ReaderT  (SagaVolatileState (ref :: REF, avar :: AVAR | eff) input action state)
                 (Aff (ref :: REF, avar :: AVAR | eff)))
       a
+
+unsafeCoerceSagaPipeEff
+  :: ∀ eff eff2 input action state a
+   . SagaPipe eff input action state a
+  -> SagaPipe eff2 input action state a
+unsafeCoerceSagaPipeEff = unsafeCoerce
 
 {-
   Install and initialize the saga middleware.
@@ -195,7 +251,7 @@ type SagaPipe eff action state a
  -}
 sagaMiddleware
   :: ∀ action state
-   . Saga _ action state Unit
+   . Saga' _ action action state Unit
   -> Redux.Middleware _ action state Unit
 sagaMiddleware saga api =
   let emitAction
