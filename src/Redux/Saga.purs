@@ -20,12 +20,14 @@ import Prelude
 
 import Data.Maybe (Maybe(..))
 import Data.Array as Array
-import Data.Either (Either(Left))
+import Data.Either (Either(Right, Left))
 import Data.Tuple.Nested ((/\))
 import Data.Either (either)
 import Data.Time.Duration (Milliseconds(..))
 import Data.Foldable (for_)
 import Data.Traversable (for)
+import Control.Alt ((<|>))
+import Control.Parallel (parallel, sequential)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Aff (forkAff, Aff, Canceler, finally, delay, launchAff, attempt)
 import Control.Monad.Aff.AVar (AVar, AVAR, takeVar, putVar, makeVar, peekVar)
@@ -35,7 +37,7 @@ import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Class (class MonadEff, liftEff)
 import Control.Monad.Eff.Ref (Ref, REF, newRef, readRef, modifyRef, modifyRef')
 import Control.Monad.Eff.Console as Console
-import Control.Monad.Eff.Exception (EXCEPTION, Error)
+import Control.Monad.Eff.Exception (EXCEPTION, Error, throwException)
 import Control.Monad.Eff.Console (CONSOLE)
 import Control.Monad.Eff.Class (liftEff)
 import Control.Monad.Eff.Unsafe (unsafeCoerceEff, unsafePerformEff)
@@ -70,23 +72,31 @@ channel
   :: ∀ eff input action state a r
    . Saga' (ref :: REF, avar :: AVAR | eff) input action state (Channel eff a action state)
 channel = Saga' $ unsafeCoerceSagaPipeEff do
+    { api, failureVar } <- unsafeCoerceSagaPipeEff $ lift ask
+    { output, input }   <- liftAff $ P.spawn P.unbounded
+    idRef               <- liftEff $ newRef 0
+    threadsRef          <- liftEff $ newRef []
+    completionVar       <- liftAff $ makeVar
 
-  { api }           <- unsafeCoerceSagaPipeEff $ lift ask
-  { output, input } <- liftAff $ P.spawn P.unbounded
-  idRef             <- liftEff $ newRef 0
-  threadsRef        <- liftEff $ newRef []
+    _ <- liftAff $ forkAff do
+      -- first exhaust the input pipe
+      P.runEffectRec $ P.for (P.fromInput input) \action -> do
+        threads <- liftEff $ readRef threadsRef
+        lift $ for_ threads \{ output } -> P.send output action
 
-  _ <- liftAff $ forkAff do
-    -- first exhaust the input pipe
-    P.runEffectRec $ P.for (P.fromInput input) \action -> do
+      -- then wait for all threads to complete running
       threads <- liftEff $ readRef threadsRef
-      lift $ for_ threads \{ output } -> P.send output action
+      for_ threads (peekVar <<< _.completionVar)
 
-    -- then wait for all threads to complete running
-    threads <- liftEff $ readRef threadsRef
-    for_ threads (peekVar <<< _.completionVar)
+      putVar completionVar unit
 
-  pure { output, input, volatile: { threadsRef, idRef, api } }
+    pure { output
+         , input
+         , volatile: { threadsRef
+                     , idRef
+                     , api
+                     , failureVar
+                     } }
 
 inChannel
   :: ∀ a input action state eff
@@ -147,7 +157,7 @@ attachSaga
    . SagaVolatileState (ref :: REF, avar :: AVAR | eff) input action state
   -> Saga' eff2 input action state Unit
   -> Aff (ref :: REF, avar :: AVAR | eff) SagaTask
-attachSaga { threadsRef, idRef, api } (Saga' saga) = do
+attachSaga { threadsRef, idRef, failureVar, api } (Saga' saga) = do
   id <- liftEff $ modifyRef' idRef \value -> { state: value + 1, value }
   { output, input } <- P.spawn P.unbounded
   completionVar <- makeVar
@@ -157,38 +167,54 @@ attachSaga { threadsRef, idRef, api } (Saga' saga) = do
         (liftEff $ modifyRef threadsRef (Array.filter ((_ /= id) <<< _.id))) do
         do
           result <- attempt do
-            flip runReaderT { api, threadsRef, idRef }
+            flip runReaderT { api, threadsRef, idRef, failureVar }
               $ P.runEffectRec
               $ P.for (P.fromInput input >-> unsafeCoerceSagaPipeEff saga) \action -> do
                   lift do
                     liftAff $ delay $ 0.0 # Milliseconds
                     liftEff $ unsafeCoerceEff $ api.dispatch action
-          -- TODO: tear down tread
           case result of
-            Left e -> traceAnyA { error: e }
-            _ -> pure unit
-          putVar completionVar $ either Just (const Nothing) result
+            Left e -> do
+              putVar completionVar $ Just e
+              putVar failureVar e
+            Right _ -> do
+              putVar completionVar Nothing
     liftEff $ modifyRef threadsRef (_ `Array.snoc` { id, output, completionVar })
 
 evaluateSaga
   :: ∀ eff eff2 action state
-   . Redux.MiddlewareAPI (avar :: AVAR, ref :: REF | eff) action state Unit
-  -> P.Input (avar :: AVAR, ref :: REF | eff) action
+   . Redux.MiddlewareAPI (avar :: AVAR, ref :: REF, exception :: EXCEPTION | eff) action state Unit
+  -> P.Input (avar :: AVAR, ref :: REF, exception :: EXCEPTION | eff) action
   -> Saga' eff2 action action state Unit
-  -> Aff (avar :: AVAR, ref :: REF | eff) Unit
+  -> Aff (avar :: AVAR, ref :: REF, exception :: EXCEPTION | eff) Unit
 evaluateSaga api input saga = do
-  idRef      <- liftEff $ newRef 0
-  threadsRef <- liftEff $ newRef []
-  _          <- attachSaga { idRef, threadsRef, api } saga
+  idRef         <- liftEff $ newRef 0
+  threadsRef    <- liftEff $ newRef []
+  failureVar    <- makeVar
 
-  -- first exhaust the input pipe
-  P.runEffectRec $ P.for (P.fromInput input) \action -> do
-    threads <- liftEff $ readRef threadsRef
-    lift $ for_ threads \{ output } -> P.send output action
+  void $ attachSaga { idRef
+                    , threadsRef
+                    , failureVar
+                    , api
+                    } saga
 
-  -- then wait for all threads to complete running
-  threads <- liftEff $ readRef threadsRef
-  for_ threads (peekVar <<< _.completionVar)
+  result <- sequential do
+    parallel (Just <$> peekVar failureVar) <|> do
+      Nothing <$ parallel do
+        -- first exhaust the input pipe
+        P.runEffectRec $ P.for (P.fromInput input) \action -> do
+          threads <- liftEff $ readRef threadsRef
+          lift $ for_ threads \{ output } -> P.send output action
+
+        -- then wait for all threads to complete running
+        threads <- liftEff $ readRef threadsRef
+        for_ threads (peekVar <<< _.completionVar)
+
+  case result of
+    Just err -> do
+      -- TODO: cancel remaining tasks
+      liftEff $ throwException err
+    _ -> pure unit
 
 {-
   The type of a saga.
@@ -232,6 +258,7 @@ type SagaVolatileState eff input action state
                                , output :: P.Output eff input
                                , completionVar :: SagaTask
                                })
+    , failureVar :: AVar Error
     , idRef :: Ref Int
     , api :: Redux.MiddlewareAPI eff action state Unit
     }
