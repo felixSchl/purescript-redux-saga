@@ -4,6 +4,7 @@ module Redux.Saga (
   , Saga'
   , SagaPipe
   , SagaVolatileState
+  , SagaTask
   , takeEvery
   , take
   , fork
@@ -19,11 +20,14 @@ import Prelude
 
 import Data.Maybe (Maybe(..))
 import Data.Array as Array
+import Data.Either (Either(Left))
 import Data.Tuple.Nested ((/\))
+import Data.Either (either)
 import Data.Time.Duration (Milliseconds(..))
 import Data.Foldable (for_)
+import Data.Traversable (for)
 import Control.Monad.Trans.Class (lift)
-import Control.Monad.Aff (forkAff, Aff, Canceler, finally, delay, launchAff)
+import Control.Monad.Aff (forkAff, Aff, Canceler, finally, delay, launchAff, attempt)
 import Control.Monad.Aff.AVar (AVar, AVAR, takeVar, putVar, makeVar, peekVar)
 import Control.Monad.Aff.Unsafe (unsafeCoerceAff)
 import Control.Monad.Aff.Class (class MonadAff, liftAff)
@@ -31,7 +35,7 @@ import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Class (class MonadEff, liftEff)
 import Control.Monad.Eff.Ref (Ref, REF, newRef, readRef, modifyRef, modifyRef')
 import Control.Monad.Eff.Console as Console
-import Control.Monad.Eff.Exception (EXCEPTION)
+import Control.Monad.Eff.Exception (EXCEPTION, Error)
 import Control.Monad.Eff.Console (CONSOLE)
 import Control.Monad.Eff.Class (liftEff)
 import Control.Monad.Eff.Unsafe (unsafeCoerceEff, unsafePerformEff)
@@ -41,6 +45,7 @@ import Control.Monad.Morph (hoist)
 import React.Redux (ReduxEffect, REDUX)
 import React.Redux as Redux
 import Unsafe.Coerce (unsafeCoerce)
+import Debug.Trace
 
 import Pipes.Aff as P
 import Pipes.Prelude as P
@@ -118,7 +123,7 @@ put action = Saga' $ P.yield action
 
 joinTask
   :: ∀ eff input action state. SagaTask
-  -> Saga' eff input action state Unit
+  -> Saga' eff input action state (Maybe Error)
 joinTask v = Saga' $ lift $ lift $ takeVar v
 
 fork
@@ -132,8 +137,8 @@ fork saga = Saga' do
 
 select
   :: ∀ eff input action state
-   . SagaPipe eff input action state state
-select = do
+   . Saga' eff input action state state
+select = Saga' do
   { api } <- lift ask
   lift $ liftEff $ unsafeCoerceEff api.getState
 
@@ -150,13 +155,19 @@ attachSaga { threadsRef, idRef, api } (Saga' saga) = do
     void $ forkAff do
       finally do
         (liftEff $ modifyRef threadsRef (Array.filter ((_ /= id) <<< _.id))) do
-        flip runReaderT { api, threadsRef, idRef }
-          $ P.runEffectRec
-          $ P.for (P.fromInput input >-> unsafeCoerceSagaPipeEff saga) \action -> do
-              lift do
-                liftAff $ delay $ 0.0 # Milliseconds
-                liftEff $ unsafeCoerceEff $ api.dispatch action
-        putVar completionVar unit
+        do
+          result <- attempt do
+            flip runReaderT { api, threadsRef, idRef }
+              $ P.runEffectRec
+              $ P.for (P.fromInput input >-> unsafeCoerceSagaPipeEff saga) \action -> do
+                  lift do
+                    liftAff $ delay $ 0.0 # Milliseconds
+                    liftEff $ unsafeCoerceEff $ api.dispatch action
+          -- TODO: tear down tread
+          case result of
+            Left e -> traceAnyA { error: e }
+            _ -> pure unit
+          putVar completionVar $ either Just (const Nothing) result
     liftEff $ modifyRef threadsRef (_ `Array.snoc` { id, output, completionVar })
 
 evaluateSaga
@@ -214,12 +225,12 @@ instance monadEffSaga :: MonadEff eff (Saga' eff input action state) where
 instance monadAffSaga :: MonadAff eff (Saga' eff input action state) where
   liftAff aff = Saga' $ lift $ lift $ unsafeCoerceAff aff
 
-type SagaTask = AVar Unit
+type SagaTask = AVar (Maybe Error)
 
 type SagaVolatileState eff input action state
   = { threadsRef :: Ref (Array { id :: Int
                                , output :: P.Output eff input
-                               , completionVar :: AVar Unit
+                               , completionVar :: SagaTask
                                })
     , idRef :: Ref Int
     , api :: Redux.MiddlewareAPI eff action state Unit
