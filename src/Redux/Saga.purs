@@ -18,36 +18,27 @@ module Redux.Saga (
 
 import Prelude
 
+import Data.Newtype (class Newtype)
 import Data.Maybe (Maybe(..))
 import Data.Array as Array
 import Data.Either (Either(Right, Left))
-import Data.Tuple.Nested ((/\))
-import Data.Either (either)
 import Data.Time.Duration (Milliseconds(..))
 import Data.Foldable (for_)
-import Data.Traversable (for)
 import Control.Alt ((<|>))
 import Control.Parallel (parallel, sequential)
 import Control.Monad.Trans.Class (lift)
-import Control.Monad.Aff (forkAff, Aff, Canceler, finally, delay, launchAff, attempt)
+import Control.Monad.Aff (forkAff, Aff, finally, delay, launchAff, attempt)
 import Control.Monad.Aff.AVar (AVar, AVAR, takeVar, putVar, makeVar, peekVar)
 import Control.Monad.Aff.Unsafe (unsafeCoerceAff)
 import Control.Monad.Aff.Class (class MonadAff, liftAff)
-import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Class (class MonadEff, liftEff)
 import Control.Monad.Eff.Ref (Ref, REF, newRef, readRef, modifyRef, modifyRef')
-import Control.Monad.Eff.Console as Console
 import Control.Monad.Eff.Exception (EXCEPTION, Error, throwException)
-import Control.Monad.Eff.Console (CONSOLE)
-import Control.Monad.Eff.Class (liftEff)
 import Control.Monad.Eff.Unsafe (unsafeCoerceEff, unsafePerformEff)
 import Control.Monad.Reader (ask)
 import Control.Monad.Reader.Trans (runReaderT, ReaderT)
-import Control.Monad.Morph (hoist)
-import React.Redux (ReduxEffect, REDUX)
 import React.Redux as Redux
 import Unsafe.Coerce (unsafeCoerce)
-import Debug.Trace
 
 import Pipes.Aff as P
 import Pipes.Prelude as P
@@ -69,7 +60,7 @@ emit
 emit a { output } = void $ P.send output a
 
 channel
-  :: ∀ eff input action state a r
+  :: ∀ eff input action state a
    . Saga' (ref :: REF, avar :: AVAR | eff) input action state (Channel eff a action state)
 channel = Saga' $ unsafeCoerceSagaPipeEff do
     { api, failureVar } <- unsafeCoerceSagaPipeEff $ lift ask
@@ -82,7 +73,7 @@ channel = Saga' $ unsafeCoerceSagaPipeEff do
       -- first exhaust the input pipe
       P.runEffectRec $ P.for (P.fromInput input) \action -> do
         threads <- liftEff $ readRef threadsRef
-        lift $ for_ threads \{ output } -> P.send output action
+        lift $ for_ threads \{ output: output' } -> P.send output' action
 
       -- then wait for all threads to complete running
       threads <- liftEff $ readRef threadsRef
@@ -126,7 +117,7 @@ take f = Saga' go
     Nothing           -> go
 
 put
-  :: ∀ input action a state eff
+  :: ∀ input action state eff
    . action
   -> Saga' eff input action state Unit
 put action = Saga' $ P.yield action
@@ -223,33 +214,22 @@ evaluateSaga api input saga = do
 type Saga eff action state a = Saga' eff action action state a
 
 newtype Saga' eff input action state a
-  = Saga' (SagaPipe (ref :: REF, avar :: AVAR | eff) input action state a)
+  = Saga' (
+      P.Pipe
+        input
+        action
+        (ReaderT  (SagaVolatileState (ref :: REF, avar :: AVAR | eff) input action state)
+                  (Aff (ref :: REF, avar :: AVAR | eff)))
+        a
+    )
 
-unSaga
-  :: ∀ eff input action state a
-   . Saga' eff input action state a
-  -> SagaPipe (ref :: REF, avar :: AVAR | eff) input action state a
-unSaga (Saga' saga) = saga
-
-instance applicativeSaga :: Applicative (Saga' eff input action state) where
-  pure a = Saga' $ pure a
-
-instance functorSaga :: Functor (Saga' eff input action state) where
-  map f (Saga' x) = Saga' $ map f x
-
-instance applySaga :: Apply (Saga' eff input action state) where
-  apply (Saga' f) (Saga' v) = Saga' $ apply f v
-
-instance bindSaga :: Bind (Saga' eff input action state) where
-  bind (Saga' v) f = Saga' $ v >>= \v -> unSaga (f v)
-
-instance monadSaga :: Monad (Saga' eff input action state)
-
-instance monadEffSaga :: MonadEff eff (Saga' eff input action state) where
-  liftEff eff = Saga' $ liftEff $ unsafeCoerceEff eff
-
-instance monadAffSaga :: MonadAff eff (Saga' eff input action state) where
-  liftAff aff = Saga' $ lift $ lift $ unsafeCoerceAff aff
+type SagaPipe eff input action state a
+  = P.Pipe
+      input
+      action
+      (ReaderT  (SagaVolatileState (ref :: REF, avar :: AVAR | eff) input action state)
+                (Aff (ref :: REF, avar :: AVAR | eff)))
+      a
 
 type SagaTask = AVar (Maybe Error)
 
@@ -263,13 +243,20 @@ type SagaVolatileState eff input action state
     , api :: Redux.MiddlewareAPI eff action state Unit
     }
 
-type SagaPipe eff input action state a
-  = P.Pipe
-      input
-      action
-      (ReaderT  (SagaVolatileState (ref :: REF, avar :: AVAR | eff) input action state)
-                (Aff (ref :: REF, avar :: AVAR | eff)))
-      a
+derive instance newtypeSaga' :: Newtype (Saga' eff input action state a) _
+
+derive newtype instance applicativeSaga :: Applicative (Saga' eff input action state)
+derive newtype instance functorSaga :: Functor (Saga' eff input action state)
+derive newtype instance applySaga :: Apply (Saga' eff input action state)
+derive newtype instance bindSaga :: Bind (Saga' eff input action state)
+derive newtype instance monadSaga :: Monad (Saga' eff input action state)
+
+instance monadEffSaga :: MonadEff eff (Saga' eff input action state) where
+  liftEff eff = Saga' $ liftEff $ unsafeCoerceEff eff
+
+instance monadAffSaga :: MonadAff eff (Saga' eff input action state) where
+  liftAff aff = Saga' $ lift $ lift $ unsafeCoerceAff aff
+
 
 unsafeCoerceSagaPipeEff
   :: ∀ eff eff2 input action state a
