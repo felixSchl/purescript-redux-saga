@@ -5,7 +5,6 @@ module Redux.Saga (
   , SagaPipe
   , SagaVolatileState
   , SagaTask
-  , takeEvery
   , take
   , fork
   , put
@@ -96,16 +95,6 @@ inChannel
   -> Saga' (ref :: REF, avar :: AVAR | eff) a action state Unit
   -> Saga' (ref :: REF, avar :: AVAR | eff) input action state Unit
 inChannel { volatile } saga = void $ liftAff $ attachSaga volatile saga
-
-takeEvery
-  :: ∀ input action state eff eff2
-   . (input -> Maybe (Saga' eff input action state Unit))
-  -> Saga' eff2 input action state SagaTask
-takeEvery f = fork $ loop
-  where
-  loop = do
-    take f
-    loop
 
 take
   :: ∀ input action state eff
