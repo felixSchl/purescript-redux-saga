@@ -30,6 +30,7 @@ import Control.Monad.Trans.Class (lift)
 import Control.Monad.Aff (forkAff, Aff, finally, delay, launchAff, attempt)
 import Control.Monad.Aff.AVar (AVar, AVAR, takeVar, putVar, makeVar, peekVar)
 import Control.Monad.Aff.Unsafe (unsafeCoerceAff)
+import Control.Monad.Rec.Class (class MonadRec, forever)
 import Control.Monad.Aff.Class (class MonadAff, liftAff)
 import Control.Monad.Eff.Class (class MonadEff, liftEff)
 import Control.Monad.Eff.Ref (Ref, REF, newRef, readRef, modifyRef, modifyRef')
@@ -250,6 +251,7 @@ derive newtype instance functorSaga :: Functor (Saga' eff input action state)
 derive newtype instance applySaga :: Apply (Saga' eff input action state)
 derive newtype instance bindSaga :: Bind (Saga' eff input action state)
 derive newtype instance monadSaga :: Monad (Saga' eff input action state)
+derive newtype instance monadRec :: MonadRec (Saga' eff input action state)
 
 instance monadEffSaga :: MonadEff eff (Saga' eff input action state) where
   liftEff eff = Saga' $ liftEff $ unsafeCoerceEff eff
