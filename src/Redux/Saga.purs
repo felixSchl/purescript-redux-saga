@@ -140,7 +140,7 @@ attachSaga
   -> Aff (ref :: REF, avar :: AVAR | eff) SagaTask
 attachSaga { threadsRef, idRef, failureVar, api } (Saga' saga) = do
   id <- liftEff $ modifyRef' idRef \value -> { state: value + 1, value }
-  { output, input } <- P.spawn P.unbounded
+  { output, input } <- P.spawn P.new
   completionVar <- makeVar
   completionVar <$ do
     void $ forkAff do
@@ -275,7 +275,7 @@ sagaMiddleware saga api =
             refOutput <- newRef Nothing
             refCallbacks  <- newRef []
             _ <- launchAff do
-              { input, output } <- P.spawn P.unbounded
+              { input, output } <- P.spawn P.new
               callbacks <- liftEff $ modifyRef' refCallbacks \value -> { state: [], value }
               for_ callbacks (_ $ output)
               liftEff $ modifyRef refOutput (const $ Just output)
