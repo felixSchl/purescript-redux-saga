@@ -12,7 +12,8 @@
     "purescript-console": "^3.0.0",
     "purescript-react-redux": "^5.1.0",
     "purescript-aff": "^3.0.0",
-    "purescript-pipes-aff": "v0.0.2"
+    "purescript-pipes": "^4.1.0",
+    "purescript-pipes-aff": "^0.1.0"
   },
   "repository": {
     "type": "git",
