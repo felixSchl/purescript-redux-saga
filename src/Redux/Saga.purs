@@ -59,11 +59,16 @@ emit
   -> Aff (ref :: REF, avar :: AVAR | eff) Unit
 emit a { output } = void $ P.send output a
 
+_ask :: Saga' eff input action state m _
+_ask = lift ask
+
 channel
-  :: ∀ eff input action state a
-   . Saga' (ref :: REF, avar :: AVAR | eff) input action state (Channel eff a action state)
+  :: ∀ eff input action state m a
+   . Monad m
+  => MonadAff (ref :: REF, avar :: AVAR | eff) m
+  => Saga' (ref :: REF, avar :: AVAR | eff) input action state m (Channel eff a action state)
 channel = Saga' $ unsafeCoerceSagaPipeEff do
-    { api, failureVar } <- unsafeCoerceSagaPipeEff $ lift ask
+    { api, failureVar } <- _ask
     { output, input }   <- liftAff $ P.spawn P.unbounded
     idRef               <- liftEff $ newRef 0
     threadsRef          <- liftEff $ newRef []
@@ -91,15 +96,17 @@ channel = Saga' $ unsafeCoerceSagaPipeEff do
 
 inChannel
   :: ∀ a input action state eff
-   . Channel eff a action state
-  -> Saga' (ref :: REF, avar :: AVAR | eff) a action state Unit
-  -> Saga' (ref :: REF, avar :: AVAR | eff) input action state Unit
+   . Monad m
+  => Channel eff a action state
+  -> Saga' (ref :: REF, avar :: AVAR | eff) a action state m Unit
+  -> Saga' (ref :: REF, avar :: AVAR | eff) input action state m Unit
 inChannel { volatile } saga = void $ liftAff $ attachSaga volatile saga
 
 take
-  :: ∀ input action state eff
-   . (input -> Maybe (Saga' eff input action state Unit))
-  -> Saga' eff input action state Unit
+  :: ∀ input action state m eff
+   . Monad m
+  => (input -> Maybe (Saga' eff input action state m Unit))
+  -> Saga' eff input action state m Unit
 take f = Saga' go
   where
   go = map f P.await >>= case _ of
@@ -107,15 +114,18 @@ take f = Saga' go
     Nothing           -> go
 
 put
-  :: ∀ input action state eff
-   . action
-  -> Saga' eff input action state Unit
+  :: ∀ input action state m eff
+   . Monad m
+  => action
+  -> Saga' eff input action state m Unit
 put action = Saga' $ P.yield action
 
 joinTask
-  :: ∀ eff input action state. SagaTask
-  -> Saga' eff input action state (Maybe Error)
-joinTask v = Saga' $ lift $ lift $ takeVar v
+  :: ∀ eff input action state m
+   . MonadAff (avar :: AVAR | eff) m
+  => SagaTask
+  -> Saga' eff input action state m (Maybe Error)
+joinTask v = Saga' $ liftAff $ takeVar v
 
 fork
   :: ∀ eff eff2 input action state
@@ -127,16 +137,18 @@ fork saga = Saga' do
     lift $ attachSaga state saga
 
 select
-  :: ∀ eff input action state
-   . Saga' eff input action state state
+  :: ∀ eff input action state m
+   . MonadEff eff m
+  => Saga' eff input action state m state
 select = Saga' do
   { api } <- lift ask
   lift $ liftEff $ unsafeCoerceEff api.getState
 
 attachSaga
-  :: ∀ eff eff2 input action state
-   . SagaVolatileState (ref :: REF, avar :: AVAR | eff) input action state
-  -> Saga' eff2 input action state Unit
+  :: ∀ eff eff2 input action state m
+   . MonadAff eff2 m
+  => SagaVolatileState (ref :: REF, avar :: AVAR | eff) input action state
+  -> Saga' eff2 input action state m Unit
   -> Aff (ref :: REF, avar :: AVAR | eff) SagaTask
 attachSaga { threadsRef, idRef, failureVar, api } (Saga' saga) = do
   id <- liftEff $ modifyRef' idRef \value -> { state: value + 1, value }
@@ -201,24 +213,22 @@ evaluateSaga api input saga = do
   The type of a saga.
   It yields and produces actions.
  -}
-type Saga eff action state a = Saga' eff action action state a
+type Saga eff action state m a = Saga' eff action action state m a
 
-newtype Saga' eff input action state a
+newtype Saga' eff input action state m a
   = Saga' (
       P.Pipe
         input
         action
-        (ReaderT  (SagaVolatileState (ref :: REF, avar :: AVAR | eff) input action state)
-                  (Aff (ref :: REF, avar :: AVAR | eff)))
+        (ReaderT (SagaVolatileState (ref :: REF, avar :: AVAR | eff) input action state) m)
         a
     )
 
-type SagaPipe eff input action state a
+type SagaPipe eff input action state m a
   = P.Pipe
       input
       action
-      (ReaderT  (SagaVolatileState (ref :: REF, avar :: AVAR | eff) input action state)
-                (Aff (ref :: REF, avar :: AVAR | eff)))
+      (ReaderT (SagaVolatileState (ref :: REF, avar :: AVAR | eff) input action state) m)
       a
 
 type SagaTask = AVar (Maybe Error)
@@ -233,26 +243,29 @@ type SagaVolatileState eff input action state
     , api :: Redux.MiddlewareAPI eff action state Unit
     }
 
-derive instance newtypeSaga' :: Newtype (Saga' eff input action state a) _
+derive instance newtypeSaga' :: Newtype (Saga' eff input action state m a) _
 
-derive newtype instance applicativeSaga :: Applicative (Saga' eff input action state)
-derive newtype instance functorSaga :: Functor (Saga' eff input action state)
-derive newtype instance applySaga :: Apply (Saga' eff input action state)
-derive newtype instance bindSaga :: Bind (Saga' eff input action state)
-derive newtype instance monadSaga :: Monad (Saga' eff input action state)
-derive newtype instance monadRec :: MonadRec (Saga' eff input action state)
+ -- XXX: why does purescript want a `Monad m` contraint here?
+derive newtype instance functorSaga :: Monad m => Functor (Saga' eff input action state m)
+derive newtype instance bindSaga :: Monad m => Bind (Saga' eff input action state m)
 
-instance monadEffSaga :: MonadEff eff (Saga' eff input action state) where
+derive newtype instance applicativeSaga :: Applicative (Saga' eff input action state m)
+derive newtype instance applySaga :: Apply (Saga' eff input action state m)
+derive newtype instance monadSaga :: Monad m => Monad (Saga' eff input action state m)
+derive newtype instance monadRec :: MonadRec m => MonadRec (Saga' eff input action state m)
+
+instance monadEffSaga :: MonadEff eff m => MonadEff eff (Saga' eff input action state m) where
   liftEff eff = Saga' $ liftEff $ unsafeCoerceEff eff
 
-instance monadAffSaga :: MonadAff eff (Saga' eff input action state) where
-  liftAff aff = Saga' $ lift $ lift $ unsafeCoerceAff aff
-
+instance monadAffSaga :: MonadAff eff m => MonadAff eff (Saga' eff input action state m) where
+  liftAff aff = Saga' $ liftAff $ unsafeCoerceAff aff
 
 unsafeCoerceSagaPipeEff
-  :: ∀ eff eff2 input action state a
-   . SagaPipe eff input action state a
-  -> SagaPipe eff2 input action state a
+  :: ∀ eff eff2 input action state m a
+   . MonadAff eff m
+  => MonadAff eff2 m
+  => SagaPipe eff input action state m a
+  -> SagaPipe eff2 input action state m a
 unsafeCoerceSagaPipeEff = unsafeCoerce
 
 {-
