@@ -1,14 +1,17 @@
 module Test.Main where
 
+import Debug.Trace
 import Prelude
 import Redux.Saga
 
-import Control.Monad.Aff (delay)
+import Control.Monad.Aff (delay, attempt)
 import Control.Monad.Aff.AVar (makeVar, takeVar, putVar)
 import Control.Monad.Aff.Class (liftAff)
 import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Class (liftEff)
+import Control.Monad.Eff.Exception (error, try)
 import Control.Monad.Eff.Ref (newRef, modifyRef, readRef)
+import Control.Monad.Error.Class (throwError)
 import Control.Safely (replicateM_)
 import Data.Array as A
 import Data.List.Lazy (replicateM)
@@ -16,7 +19,7 @@ import Data.Maybe (Maybe(..))
 import Data.Time.Duration (Milliseconds(..))
 import React.Redux (ReduxEffect)
 import React.Redux as Redux
-import Test.Spec (pending, describe, it)
+import Test.Spec (describe, describeOnly,  it, itOnly, pending')
 import Test.Spec.Assertions (shouldEqual)
 import Test.Spec.Reporter.Console (consoleReporter)
 import Test.Spec.Runner (RunnerEffects, run)
@@ -33,7 +36,7 @@ mkStore
 mkStore reducer initialState saga
     = Redux.createStore reducer
                         initialState
-                        $ Redux.applyMiddleware  [ sagaMiddleware saga ]
+                        $ Redux.applyMiddleware [ sagaMiddleware saga ]
 
 withCompletionVar f = do
   completedVar <- liftAff makeVar
@@ -44,7 +47,7 @@ main :: Eff _ Unit
 main = run [consoleReporter] do
   describe "sagas" do
     describe "take" do
-      it "should run handler" do
+      it "should run matching action handler" do
         r <- withCompletionVar \done -> do
           liftEff $ void $ mkStore (const id) {} do
             void $ fork do
@@ -53,7 +56,7 @@ main = run [consoleReporter] do
             put 1
         r `shouldEqual` 1
 
-      it "should run handler" do
+      it "should ignore non-matching actions" do
         r <- withCompletionVar \done -> do
           liftEff $ void $ mkStore (const id) {} do
             void $ fork do
@@ -64,7 +67,7 @@ main = run [consoleReporter] do
             put 2
         r `shouldEqual` 2
 
-      it "should run handler" do
+      it "should be able to run repeatedly" do
         r <- withCompletionVar \done -> do
           liftEff $ void $ mkStore (const id) {} do
             ref <- liftEff $ newRef []
@@ -77,3 +80,28 @@ main = run [consoleReporter] do
             put 2
             put 3
         r `shouldEqual` [1, 2, 3]
+
+      it "should block the thread" do
+        r <- withCompletionVar \done -> do
+          liftEff $ void $ mkStore (const id) {} do
+            ref <- liftEff $ newRef []
+            liftAff $ delay (10.0 # Milliseconds) *> done true
+            take (const Nothing)
+            liftAff $ done true
+        r `shouldEqual` true
+
+    describeOnly "error handling" do
+      pending' "should terminate on errors" do
+        -- TODO: How to actually catch these? or at least test that it's
+        -- actually crashing
+        void $ withCompletionVar \done -> do
+          liftEff $ void $ mkStore (const id) {} do
+            liftAff $ void $ throwError $ error "oh no"
+
+      it "sub-sagas should bubble up errors" do
+        -- TODO: How to actually catch these? or at least test that it's
+        -- actually crashing
+        void $ withCompletionVar \done -> do
+          liftEff $ void $ mkStore (const id) {} do
+            void $ fork do
+              liftAff $ void $ throwError $ error "oh no"

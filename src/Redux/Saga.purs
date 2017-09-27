@@ -15,37 +15,37 @@ module Redux.Saga (
   , emit
   ) where
 
+import Debug.Trace
 import Prelude
 
-import Data.Newtype (class Newtype)
-import Data.Maybe (Maybe(..))
-import Data.Array as Array
-import Data.Either (Either(Right, Left))
-import Data.Time.Duration (Milliseconds(..))
-import Data.Foldable (for_)
 import Control.Alt ((<|>))
-import Control.Parallel (parallel, sequential)
-import Control.Monad.Trans.Class (lift)
 import Control.Monad.Aff (forkAff, Aff, finally, delay, launchAff, attempt)
 import Control.Monad.Aff.AVar (AVar, AVAR, takeVar, putVar, makeVar, peekVar)
-import Control.Monad.Aff.Unsafe (unsafeCoerceAff)
-import Control.Monad.Rec.Class (class MonadRec, forever)
 import Control.Monad.Aff.Class (class MonadAff, liftAff)
+import Control.Monad.Aff.Unsafe (unsafeCoerceAff)
 import Control.Monad.Eff.Class (class MonadEff, liftEff)
+import Control.Monad.Eff.Exception (EXCEPTION, error, Error, throwException, stack)
 import Control.Monad.Eff.Ref (Ref, REF, newRef, readRef, modifyRef, modifyRef')
-import Control.Monad.Eff.Exception (EXCEPTION, Error, throwException)
 import Control.Monad.Eff.Unsafe (unsafeCoerceEff, unsafePerformEff)
-import Control.Monad.Rec.Class (class MonadRec)
+import Control.Monad.Error.Class (class MonadError, class MonadThrow, throwError, catchError)
 import Control.Monad.Reader (ask)
 import Control.Monad.Reader.Trans (runReaderT, ReaderT)
+import Control.Monad.Rec.Class (class MonadRec)
+import Control.Monad.Trans.Class (lift)
+import Control.Parallel (parallel, sequential)
+import Data.Array as Array
+import Data.Either (Either(Right, Left))
+import Data.Foldable (for_)
+import Data.Maybe (Maybe(..), maybe, fromMaybe)
+import Data.Newtype (class Newtype)
+import Data.Time.Duration (Milliseconds(..))
+import Pipes ((>->))
+import Pipes as P
+import Pipes.Aff as P
+import Pipes.Core as P
+import Pipes.Prelude as P
 import React.Redux as Redux
 import Unsafe.Coerce (unsafeCoerce)
-
-import Pipes.Aff as P
-import Pipes.Prelude as P
-import Pipes ((>->))
-import Pipes.Core as P
-import Pipes as P
 
 type Channel eff a action state
   = { volatile :: SagaVolatileState (ref :: REF, avar :: AVAR | eff) a action state
@@ -95,7 +95,7 @@ inChannel
    . Channel eff a action state
   -> Saga' (ref :: REF, avar :: AVAR | eff) a action state Unit
   -> Saga' (ref :: REF, avar :: AVAR | eff) input action state Unit
-inChannel { volatile } saga = void $ liftAff $ attachSaga volatile saga
+inChannel { volatile } saga = void $ liftAff $ attachSaga volatile saga Nothing
 
 take
   :: ∀ input action state eff
@@ -125,7 +125,7 @@ fork
 fork saga = Saga' do
   lift do
     state <- ask
-    lift $ attachSaga state saga
+    lift $ attachSaga state saga Nothing
 
 select
   :: ∀ eff input action state
@@ -138,8 +138,10 @@ attachSaga
   :: ∀ eff eff2 input action state
    . SagaVolatileState (ref :: REF, avar :: AVAR | eff) input action state
   -> Saga' eff2 input action state Unit
+  -> Maybe String
   -> Aff (ref :: REF, avar :: AVAR | eff) SagaTask
-attachSaga { threadsRef, idRef, failureVar, api } (Saga' saga) = do
+attachSaga { threadsRef, idRef, failureVar, api } (Saga' saga) mTag = do
+  let tag = fromMaybe "anonymous" mTag
   id <- liftEff $ modifyRef' idRef \value -> { state: value + 1, value }
   { output, input } <- P.spawn P.new
   completionVar <- makeVar
@@ -157,8 +159,12 @@ attachSaga { threadsRef, idRef, failureVar, api } (Saga' saga) = do
                     liftEff $ unsafeCoerceEff $ api.dispatch action
           case result of
             Left e -> do
-              putVar completionVar $ Just e
-              putVar failureVar e
+              let e' = error
+                        $ "Saga " <> show tag
+                          <> " terminated due to error"
+                          <> maybe "" (", stack trace follows:\n" <> _) (stack e)
+              putVar completionVar $ Just e'
+              putVar failureVar e'
             Right _ -> do
               putVar completionVar Nothing
     liftEff $ modifyRef threadsRef (_ `Array.snoc` { id, output, completionVar })
@@ -179,6 +185,7 @@ evaluateSaga api input saga = do
                     , failureVar
                     , api
                     } saga
+                    (Just "root")
 
   result <- sequential do
     parallel (Just <$> peekVar failureVar) <|> do
@@ -195,7 +202,7 @@ evaluateSaga api input saga = do
   case result of
     Just err -> do
       -- TODO: cancel remaining tasks
-      liftEff $ throwException err
+      throwError err
     _ -> pure unit
 
 {-
@@ -242,6 +249,8 @@ derive newtype instance applySaga :: Apply (Saga' eff input action state)
 derive newtype instance bindSaga :: Bind (Saga' eff input action state)
 derive newtype instance monadSaga :: Monad (Saga' eff input action state)
 derive newtype instance monadRecSaga :: MonadRec (Saga' eff input action state)
+derive newtype instance monadThrowSaga :: MonadThrow Error (Saga' eff input action state)
+derive newtype instance monadErrorSaga :: MonadError Error (Saga' eff input action state)
 
 instance monadEffSaga :: MonadEff eff (Saga' eff input action state) where
   liftEff eff = Saga' $ liftEff $ unsafeCoerceEff eff
@@ -280,7 +289,12 @@ sagaMiddleware saga api =
               callbacks <- liftEff $ modifyRef' refCallbacks \value -> { state: [], value }
               for_ callbacks (_ $ output)
               liftEff $ modifyRef refOutput (const $ Just output)
-              evaluateSaga api input saga
+              liftAff $ delay (0.0 # Milliseconds)
+              flip catchError
+                (\e ->
+                  let msg = maybe "" (", stack trace follows:\n" <> _) $ stack e
+                   in throwError $ error $ "Saga terminated due to error" <> msg)
+                $ evaluateSaga api input saga
             pure \action -> void do
               readRef refOutput >>= case _ of
                 Just output -> void $ launchAff $ P.send output action
