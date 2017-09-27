@@ -35,6 +35,7 @@ import Control.Monad.Eff.Class (class MonadEff, liftEff)
 import Control.Monad.Eff.Ref (Ref, REF, newRef, readRef, modifyRef, modifyRef')
 import Control.Monad.Eff.Exception (EXCEPTION, Error, throwException)
 import Control.Monad.Eff.Unsafe (unsafeCoerceEff, unsafePerformEff)
+import Control.Monad.Rec.Class (class MonadRec)
 import Control.Monad.Reader (ask)
 import Control.Monad.Reader.Trans (runReaderT, ReaderT)
 import React.Redux as Redux
@@ -240,7 +241,7 @@ derive newtype instance functorSaga :: Functor (Saga' eff input action state)
 derive newtype instance applySaga :: Apply (Saga' eff input action state)
 derive newtype instance bindSaga :: Bind (Saga' eff input action state)
 derive newtype instance monadSaga :: Monad (Saga' eff input action state)
-derive newtype instance monadRec :: MonadRec (Saga' eff input action state)
+derive newtype instance monadRecSaga :: MonadRec (Saga' eff input action state)
 
 instance monadEffSaga :: MonadEff eff (Saga' eff input action state) where
   liftEff eff = Saga' $ liftEff $ unsafeCoerceEff eff

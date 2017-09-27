@@ -13,13 +13,15 @@
     "purescript-react-redux": "^5.1.0",
     "purescript-aff": "^3.0.0",
     "purescript-pipes": "^4.1.0",
-    "purescript-pipes-aff": "^0.1.0"
+    "purescript-pipes-aff": "^0.1.0",
+    "purescript-safely": "^3.0.0"
   },
   "repository": {
     "type": "git",
     "url": "git://github.com/felixschl/purescript-redux-saga.git"
   },
   "devDependencies": {
-    "purescript-psci-support": "^3.0.0"
+    "purescript-psci-support": "^3.0.0",
+    "purescript-spec": "^1.0.0"
   }
 }
