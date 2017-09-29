@@ -69,12 +69,11 @@ channel tag cb (Saga' saga) = do
   let log :: String -> IO Unit
       log msg = debugA $ "fork (" <> tag <> "): " <> msg
 
-  parentThread <- Saga' $ lift ask
+  childThread <- newThread' "channel"
 
   chan <- liftAff $ P.spawn P.unbounded
 
   void $ liftAff $ forkAff $ runIO $ do
-    childThread <- newThread "channel" parentThread.idSupply parentThread.api
     c <- liftAff $ forkAff $ runIO do
       log "attaching child process (channel)"
       liftAff do
@@ -97,9 +96,9 @@ channel tag cb (Saga' saga) = do
   liftIO $ cb (\value -> void $ liftAff $ P.send value chan)
 
 take
-  :: ∀ input action state
-   . (input -> Maybe (Saga' input action state Unit))
-  -> Saga' input action state Unit
+  :: ∀ input output state
+   . (input -> Maybe (Saga' input output state Unit))
+  -> Saga' input output state Unit
 take f = Saga' go
   where
   go = map f P.await >>= case _ of
@@ -113,22 +112,22 @@ put
 put action = Saga' $ P.yield action
 
 joinTask
-  :: ∀ input action state
+  :: ∀ input output state
    . SagaTask
-  -> Saga' input action state Unit
+  -> Saga' input output state Unit
 joinTask (SagaTask { completionVar }) = Saga' $ liftIO $ liftAff $ takeVar completionVar
 
 cancel
-  :: ∀ input action state
+  :: ∀ input output state
    . SagaTask
-  -> Saga' input action state Unit
+  -> Saga' input output state Unit
 cancel (SagaTask { canceler }) = void do
   -- XXX: Why does the canceler not return?
   liftAff $ forkAff $ Aff.cancel canceler (error "CANCEL_TASK")
 
 select
-  :: ∀ input action state
-   . Saga' input action state state
+  :: ∀ input output state
+   . Saga' input output state state
 select = Saga' do
   { api } <- ask
   liftEff $ unsafeCoerceEff api.getState
@@ -274,12 +273,22 @@ nextId :: IdSupply -> IO Int
 nextId (IdSupply ref) = liftEff $ modifyRef' ref \value -> { state: value + 1, value }
 
 newThread
-  :: ∀ input action state
+  :: ∀ input output state
    . String
   -> IdSupply
-  -> Redux.MiddlewareAPI (infinity :: INFINITY) action state Unit
-  -> IO (SagaThread input action state)
+  -> Redux.MiddlewareAPI (infinity :: INFINITY) output state Unit
+  -> IO (SagaThread input output state)
 newThread tag idSupply api = do
+  failureVar <- liftAff $ makeVar
+  procsRef <- liftEff $ newRef []
+  pure { tag, idSupply, procsRef, failureVar, api }
+
+newThread'
+  :: ∀ input' input output state
+   . String
+  -> Saga' input output state (SagaThread input' output state)
+newThread' tag = do
+  { idSupply, api } <- Saga' $ lift ask
   failureVar <- liftAff $ makeVar
   procsRef <- liftEff $ newRef []
   pure { tag, idSupply, procsRef, failureVar, api }
