@@ -248,9 +248,10 @@ main = run' (defaultConfig { timeout = Just 3000 }) [consoleReporter] do
           r <- runIO' $ withCompletionVar \done -> do
             void $ mkStore (const id) {} do
               channel "foo"
-                (\emit -> emit unit)
-                (take $ const $ pure do
-                  put "foo"
+                (\emit -> emit 1)
+                (take case _ of
+                  1 -> pure $ put "foo"
+                  _ -> Nothing
                 )
               take case _ of
                 "foo" -> pure do

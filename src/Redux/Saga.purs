@@ -134,25 +134,25 @@ select = Saga' do
   liftEff $ unsafeCoerceEff api.getState
 
 fork
-  :: ∀ action state
-   . Saga' action action state Unit
-  -> Saga' action action state SagaTask
+  :: ∀ input output state
+   . Saga' input output state Unit
+  -> Saga' input output state SagaTask
 fork = forkNamed "anonymous"
 
 forkNamed
-  :: ∀ action state
+  :: ∀ input output state
    . String
-  -> Saga' action action state Unit
-  -> Saga' action action state SagaTask
+  -> Saga' input output state Unit
+  -> Saga' input output state SagaTask
 forkNamed tag saga = do
   thread <- Saga' $ lift ask
   liftIO $ fork' tag thread saga
 
 fork'
-  :: ∀ action state
+  :: ∀ input output state
    . String
-  -> SagaThread action action state
-  -> Saga' action action state Unit
+  -> SagaThread input output state
+  -> Saga' input output state Unit
   -> IO SagaTask
 fork' tag parentThread (Saga' saga) = do
   let tag' = parentThread.tag <> ">" <> tag
@@ -365,9 +365,9 @@ attachProc tag f thread = do
   and "redux-saga" does the equivalent hack in it's codebase.
  -}
 sagaMiddleware
-  :: ∀ action state
+  :: ∀ action state eff
    . Saga' action action state Unit
-  -> Redux.Middleware (infinity :: INFINITY) action state Unit
+  -> Redux.Middleware eff action state Unit
 sagaMiddleware saga api =
   let emitAction
         = unsafePerformEff do
@@ -380,7 +380,7 @@ sagaMiddleware saga api =
               liftEff $ modifyRef refOutput (const $ Just $ P.output chan)
               runIO' do
                 idSupply <- newIdSupply
-                thread <- newThread "root" idSupply api
+                thread <- newThread "root" idSupply (unsafeCoerce api)
                 task <- fork' "main" thread saga
                 flip catchError
                   (\e ->
