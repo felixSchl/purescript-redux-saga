@@ -1,33 +1,29 @@
 module Test.Main where
 
-import Debug.Trace
 import Prelude
 import Redux.Saga
 
-import Control.Monad.Aff (attempt, delay, forkAff)
+import Control.Monad.Aff (delay, forkAff)
 import Control.Monad.Aff.AVar (makeVar, takeVar, putVar)
 import Control.Monad.Aff.Class (liftAff)
 import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Class (liftEff)
-import Control.Monad.Eff.Exception (error, try)
-import Control.Monad.Eff.Ref (modifyRef', modifyRef, newRef, readRef)
+import Control.Monad.Eff.Exception (error)
+import Control.Monad.Eff.Ref (modifyRef, newRef, readRef)
 import Control.Monad.Error.Class (throwError)
-import Control.Monad.IO (IO, runIO, runIO')
+import Control.Monad.IO (IO, runIO')
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Rec.Class (forever)
 import Control.Safely (replicateM_)
 import Data.Array as A
-import Data.Either (Either(..))
 import Data.Foldable (for_)
-import Data.List.Lazy (replicateM)
 import Data.Maybe (Maybe(..))
 import Data.Time.Duration (Milliseconds(..))
-import React.Redux (ReduxEffect)
 import React.Redux as Redux
 import Test.Spec (describe, describeOnly, it, itOnly, pending')
 import Test.Spec.Assertions (shouldEqual)
 import Test.Spec.Reporter.Console (consoleReporter)
-import Test.Spec.Runner (RunnerEffects, run, run', defaultConfig)
+import Test.Spec.Runner (run', defaultConfig)
 
 data Action = SearchChanged String
 type GlobalState = {}

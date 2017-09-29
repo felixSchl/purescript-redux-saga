@@ -17,7 +17,6 @@ module Redux.Saga (
   , channel
   ) where
 
-import Debug.Trace
 import Prelude
 
 import Control.Alt ((<|>))
@@ -25,17 +24,15 @@ import Control.Monad.Aff (Canceler(..), attempt, cancelWith, delay, forkAff, lau
 import Control.Monad.Aff as Aff
 import Control.Monad.Aff.AVar (AVar, makeVar, peekVar, putVar, takeVar, tryPeekVar)
 import Control.Monad.Aff.Class (class MonadAff, liftAff)
-import Control.Monad.Aff.Unsafe (unsafeCoerceAff)
 import Control.Monad.Eff.Class (class MonadEff, liftEff)
 import Control.Monad.Eff.Exception (Error, error, stack)
-import Control.Monad.Eff.Ref (Ref, REF, newRef, readRef, modifyRef, modifyRef')
+import Control.Monad.Eff.Ref (Ref, newRef, readRef, modifyRef, modifyRef')
 import Control.Monad.Eff.Unsafe (unsafeCoerceEff, unsafePerformEff)
 import Control.Monad.Error.Class (class MonadError, class MonadThrow, throwError, catchError)
 import Control.Monad.IO (IO, runIO, runIO')
 import Control.Monad.IO.Class (class MonadIO, liftIO)
 import Control.Monad.IO.Effect (INFINITY)
 import Control.Monad.Reader (ask)
-import Control.Monad.Reader.Class (class MonadAsk)
 import Control.Monad.Reader.Trans (runReaderT, ReaderT)
 import Control.Monad.Rec.Class (class MonadRec)
 import Control.Monad.Trans.Class (lift)
@@ -46,20 +43,16 @@ import Data.Foldable (for_)
 import Data.Maybe (Maybe(..), maybe)
 import Data.Newtype (class Newtype)
 import Data.Time.Duration (Milliseconds(..))
+import Global (infinity)
 import Pipes ((>->))
 import Pipes as P
-import Pipes.Aff (Output)
 import Pipes.Aff as P
 import Pipes.Core as P
-import Pipes.Prelude as P
-import React.Redux (REDUX)
+import React.Redux (ReduxEffect)
 import React.Redux as Redux
 import Unsafe.Coerce (unsafeCoerce)
 
-unsafeCoerceAffA :: ∀ m eff eff2 a. m eff a -> m eff2 a
-unsafeCoerceAffA = unsafeCoerce
-
-unsafeCoerceAff' :: ∀ m eff eff2 a. m eff -> m eff2
+unsafeCoerceAff' :: ∀ m eff eff2. m eff -> m eff2
 unsafeCoerceAff' = unsafeCoerce
 
 debugA :: ∀ a b. Show b => Applicative a => b -> a Unit
@@ -156,7 +149,7 @@ forkNamed tag saga = do
   liftIO $ fork' tag thread saga
 
 fork'
-  :: ∀ input action state
+  :: ∀ action state
    . String
   -> SagaThread action action state
   -> Saga' action action state Unit
@@ -292,7 +285,7 @@ newThread tag idSupply api = do
   pure { tag, idSupply, procsRef, failureVar, api }
 
 runThread
-  :: ∀ eff input output state
+  :: ∀ input output state
    . P.Input input
   -> SagaThread input output state
   -> IO Unit
@@ -325,7 +318,7 @@ runThread input thread = do
       log $ "finished"
 
 attachProc
-  :: ∀ eff input output state
+  :: ∀ input output state
    . String
   -> (P.Input input -> IO Unit -> IO Unit)
   -> SagaThread input output state
@@ -374,7 +367,7 @@ attachProc tag f thread = do
 sagaMiddleware
   :: ∀ action state
    . Saga' action action state Unit
-  -> Redux.Middleware _ action state Unit
+  -> Redux.Middleware (infinity :: INFINITY) action state Unit
 sagaMiddleware saga api =
   let emitAction
         = unsafePerformEff do
