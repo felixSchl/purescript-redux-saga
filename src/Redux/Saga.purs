@@ -9,13 +9,12 @@ module Redux.Saga (
   , IdSupply
   , take
   , fork
+  , forkNamed
   , put
   , select
   , joinTask
   , cancel
-  -- , channel
-  -- , inChannel
-  -- , emit
+  , channel
   ) where
 
 import Debug.Trace
@@ -67,55 +66,42 @@ debugA :: ∀ a b. Show b => Applicative a => b -> a Unit
 debugA _ = pure unit
 -- debugA = traceAnyA
 
--- type Channel eff a action state
---   = { thread :: SagaThread (ref :: REF, avar :: AVAR | eff) a action state
---     , output :: P.Output (ref :: REF, avar :: AVAR | eff) a
---     , input :: P.Input (ref :: REF, avar :: AVAR | eff) a
---     }
---
--- emit
---   :: ∀ eff a action state
---    . a
---   -> Channel eff a action state
---   -> Aff (ref :: REF, avar :: AVAR | eff) Unit
--- emit a { output } = void $ P.send output a
---
--- channel
---   :: ∀ eff input action state a
---    . Saga' (ref :: REF, avar :: AVAR | eff) input action state (Channel eff a action state)
--- channel = Saga' $ unsafeCoerceSagaPipeEff do
---     { api, failureVar } <- unsafeCoerceSagaPipeEff $ lift ask
---     { output, input }   <- liftAff $ P.spawn P.unbounded
---     idSupply               <- liftEff $ newRef 0
---     threadsRef          <- liftEff $ newRef []
---     completionVar       <- liftAff $ makeVar
---
---     _ <- liftAff $ forkAff do
---       -- first exhaust the input pipe
---       P.runEffectRec $ P.for (P.fromInput input) \action -> do
---         threads <- liftEff $ readRef threadsRef
---         lift $ for_ threads \{ output: output' } -> P.send output' action
---
---       -- then wait for all threads to complete running
---       threads <- liftEff $ readRef threadsRef
---       for_ threads (peekVar <<< _.task.completionVar)
---
---       putVar completionVar unit
---
---     pure { output
---          , input
---          , thread: { threadsRef
---                      , idSupply
---                      , api
---                      , failureVar
---                      } }
---
--- inChannel
---   :: ∀ a input action state eff
---    . Channel eff a action state
---   -> Saga' (ref :: REF, avar :: AVAR | eff) a action state Unit
---   -> Saga' (ref :: REF, avar :: AVAR | eff) input action state Unit
--- inChannel { thread } saga = void $ liftAff $ attachSaga thread saga Nothing
+channel
+  :: ∀ input action state
+   . String
+  -> ((input -> IO Unit) -> IO Unit)
+  -> Saga' input action state Unit
+  -> Saga' action action state Unit
+channel tag cb (Saga' saga) = do
+  let log :: String -> IO Unit
+      log msg = debugA $ "fork (" <> tag <> "): " <> msg
+
+  parentThread <- Saga' $ lift ask
+
+  { output, input } <- liftAff $ P.spawn P.unbounded
+
+  void $ liftAff $ forkAff $ runIO $ do
+    childThread <- newThread "channel" parentThread.idSupply parentThread.api
+    c <- liftAff $ forkAff $ runIO do
+      log "attaching child process (channel)"
+      liftAff do
+        runIO' $ flip (attachProc $ tag <> " - channel") childThread \input' seal' -> do
+          liftAff do
+            (runIO' do
+              flip runReaderT childThread
+                $ P.runEffectRec
+                $ P.for (P.fromInput input' >-> saga) \action -> do
+                    lift do
+                      liftAff $ delay $ 0.0 # Milliseconds
+                      liftEff $ unsafeCoerceEff $ childThread.api.dispatch action
+            ) `cancelWith` (Canceler \_ -> true <$ runIO do
+                            log "canceling: sealing task"
+                            seal'
+                            )
+      log "saga channel process finished"
+    liftIO $ runThread input childThread
+
+  liftIO $ cb (\i -> void $ liftAff $ P.send (unsafeCoerceAffA output) i)
 
 take
   :: ∀ input action state
@@ -184,13 +170,13 @@ fork' tag parentThread (Saga' saga) = do
     innerCancelerVar <- makeVar
 
     runIO' $ log "attaching child thread process"
-    (runIO' $ flip (attachProc $ tag' <> "(thread)") parentThread \input seal -> do
+    (runIO' $ flip (attachProc $ tag' <> " - thread") parentThread \input seal -> do
       log "spawning child process (thread)"
       childThread <- newThread tag' parentThread.idSupply parentThread.api
       c <- liftAff $ forkAff $ runIO do
         log "attaching child process (task)"
         liftAff do
-          runIO' $ flip (attachProc $ tag' <> " (task)") childThread \input' seal' -> do
+          runIO' $ flip (attachProc $ tag' <> " - task") childThread \input' seal' -> do
             liftAff do
               (runIO' do
                 flip runReaderT childThread
@@ -232,14 +218,33 @@ newtype SagaTask = SagaTask
   , canceler :: Canceler (infinity :: INFINITY)
   }
 
-newtype Saga' input action state a
+newtype Saga' input output state a
   = Saga' (
       P.Pipe
         input
-        action
-        (ReaderT (SagaThread input action state) IO)
+        output
+        (ReaderT (SagaThread input output state) IO)
         a
     )
+
+derive instance newtypeSaga' :: Newtype (Saga' input action state a) _
+derive newtype instance applicativeSaga :: Applicative (Saga' input action state)
+derive newtype instance functorSaga :: Functor (Saga' input action state)
+derive newtype instance applySaga :: Apply (Saga' input action state)
+derive newtype instance bindSaga :: Bind (Saga' input action state)
+derive newtype instance monadSaga :: Monad (Saga' input action state)
+derive newtype instance monadRecSaga :: MonadRec (Saga' input action state)
+derive newtype instance monadThrowSaga :: MonadThrow Error (Saga' input action state)
+derive newtype instance monadErrorSaga :: MonadError Error (Saga' input action state)
+
+instance monadIOSaga :: MonadIO (Saga' input action state) where
+  liftIO action = Saga' $ liftIO action
+
+instance monadEffSaga :: MonadEff eff (Saga' input action state) where
+  liftEff action = Saga' $ liftEff action
+
+instance monadAffSaga :: MonadAff eff (Saga' input action state) where
+  liftAff action = Saga' $ liftAff action
 
 type SagaPipe input action state a
   = P.Pipe
@@ -262,6 +267,11 @@ type SagaThread input action state
     , api :: Redux.MiddlewareAPI (infinity :: INFINITY) action state Unit
     }
 
+type Channel a action state
+  = { output :: P.Output (infinity :: INFINITY) a
+    , input :: P.Input (infinity :: INFINITY) a
+    }
+
 newtype IdSupply = IdSupply (Ref Int)
 
 newIdSupply :: IO IdSupply
@@ -282,9 +292,9 @@ newThread tag idSupply api = do
   pure { tag, idSupply, procsRef, failureVar, api }
 
 runThread
-  :: ∀ eff action state
-   . P.Input (ref :: REF | eff) action
-  -> SagaThread action action state
+  :: ∀ eff input output state
+   . P.Input (ref :: REF | eff) input
+  -> SagaThread input output state
   -> IO Unit
 runThread input thread = do
   let log :: String -> IO Unit
@@ -296,10 +306,10 @@ runThread input thread = do
         runIO' do
           log "running input pipe"
           liftAff do
-            P.runEffectRec $ P.for (P.fromInput input) \action -> do
+            P.runEffectRec $ P.for (P.fromInput input) \input -> do
               procs <- liftEff $ readRef thread.procsRef
               lift $ for_ procs \{ output, id } -> do
-                P.send (unsafeCoerceAffA output) action
+                P.send (unsafeCoerceAffA output) input
           log "input pipe exhausted"
           procs <- liftEff $ readRef thread.procsRef
           log $ "waiting for " <> show (Array.length procs) <> " processes to finish running..."
@@ -317,8 +327,8 @@ runThread input thread = do
 attachProc
   :: ∀ eff input output state
    . String
-  -> (P.Input (ref :: REF | eff) output -> IO Unit -> IO Unit)
-  -> SagaThread output output state
+  -> (P.Input (ref :: REF | eff) input -> IO Unit -> IO Unit)
+  -> SagaThread input output state
   -> IO Unit
 attachProc tag f thread = do
   id <- nextId $ thread.idSupply
@@ -342,7 +352,7 @@ attachProc tag f thread = do
         Left e -> do
           log $ "terminated with error"
           let e' = error
-                    $ "Process (pid " <> show id <> ") terminated due to error"
+                    $ "Process (" <> tag <> ", pid=" <> show id <> ") terminated due to error"
                       <> maybe "" (", stack trace follows:\n" <> _) (stack e)
           liftAff $ putVar thread.failureVar e'
     ) `cancelWith` (Canceler \error -> true <$ runIO do
@@ -350,26 +360,6 @@ attachProc tag f thread = do
                       liftAff seal
                       liftAff $ putVar successVar unit
                    )
-
-derive instance newtypeSaga' :: Newtype (Saga' input action state a) _
-
-derive newtype instance applicativeSaga :: Applicative (Saga' input action state)
-derive newtype instance functorSaga :: Functor (Saga' input action state)
-derive newtype instance applySaga :: Apply (Saga' input action state)
-derive newtype instance bindSaga :: Bind (Saga' input action state)
-derive newtype instance monadSaga :: Monad (Saga' input action state)
-derive newtype instance monadRecSaga :: MonadRec (Saga' input action state)
-derive newtype instance monadThrowSaga :: MonadThrow Error (Saga' input action state)
-derive newtype instance monadErrorSaga :: MonadError Error (Saga' input action state)
-
-instance monadIOSaga :: MonadIO (Saga' input action state) where
-  liftIO action = Saga' $ liftIO action
-
-instance monadEffSaga :: MonadEff eff (Saga' input action state) where
-  liftEff action = Saga' $ liftEff action
-
-instance monadAffSaga :: MonadAff eff (Saga' input action state) where
-  liftAff action = Saga' $ liftAff action
 
 {-
   Install and initialize the saga middleware.
