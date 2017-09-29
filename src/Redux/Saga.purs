@@ -78,7 +78,7 @@ channel tag cb (Saga' saga) = do
 
   parentThread <- Saga' $ lift ask
 
-  { output, input } <- liftAff $ P.spawn P.unbounded
+  chan <- liftAff $ P.spawn P.unbounded
 
   void $ liftAff $ forkAff $ runIO $ do
     childThread <- newThread "channel" parentThread.idSupply parentThread.api
@@ -90,7 +90,7 @@ channel tag cb (Saga' saga) = do
             (runIO' do
               flip runReaderT childThread
                 $ P.runEffectRec
-                $ P.for (P.fromInput input' >-> saga) \action -> do
+                $ P.for (P.fromInput' input' >-> saga) \action -> do
                     lift do
                       liftAff $ delay $ 0.0 # Milliseconds
                       liftEff $ unsafeCoerceEff $ childThread.api.dispatch action
@@ -99,9 +99,9 @@ channel tag cb (Saga' saga) = do
                             seal'
                             )
       log "saga channel process finished"
-    liftIO $ runThread input childThread
+    liftIO $ runThread (P.input chan) childThread
 
-  liftIO $ cb (\i -> void $ liftAff $ P.send (unsafeCoerceAffA output) i)
+  liftIO $ cb (\value -> void $ liftAff $ P.send value chan)
 
 take
   :: ∀ input action state
@@ -181,7 +181,7 @@ fork' tag parentThread (Saga' saga) = do
               (runIO' do
                 flip runReaderT childThread
                   $ P.runEffectRec
-                  $ P.for (P.fromInput input' >-> saga) \action -> do
+                  $ P.for (P.fromInput' input' >-> saga) \action -> do
                       lift do
                         liftAff $ delay $ 0.0 # Milliseconds
                         liftEff $ unsafeCoerceEff $ childThread.api.dispatch action
@@ -255,7 +255,7 @@ type SagaPipe input action state a
 
 type SagaProc input
   = { id :: Int
-    , output :: P.Output (infinity :: INFINITY) input
+    , output :: P.Output input
     , successVar :: AVar Unit
     }
 
@@ -268,8 +268,8 @@ type SagaThread input action state
     }
 
 type Channel a action state
-  = { output :: P.Output (infinity :: INFINITY) a
-    , input :: P.Input (infinity :: INFINITY) a
+  = { output :: P.Output a
+    , input :: P.Input a
     }
 
 newtype IdSupply = IdSupply (Ref Int)
@@ -293,7 +293,7 @@ newThread tag idSupply api = do
 
 runThread
   :: ∀ eff input output state
-   . P.Input (ref :: REF | eff) input
+   . P.Input input
   -> SagaThread input output state
   -> IO Unit
 runThread input thread = do
@@ -306,10 +306,10 @@ runThread input thread = do
         runIO' do
           log "running input pipe"
           liftAff do
-            P.runEffectRec $ P.for (P.fromInput input) \input -> do
+            P.runEffectRec $ P.for (P.fromInput' input) \value -> do
               procs <- liftEff $ readRef thread.procsRef
               lift $ for_ procs \{ output, id } -> do
-                P.send (unsafeCoerceAffA output) input
+                P.send' value output
           log "input pipe exhausted"
           procs <- liftEff $ readRef thread.procsRef
           log $ "waiting for " <> show (Array.length procs) <> " processes to finish running..."
@@ -327,7 +327,7 @@ runThread input thread = do
 attachProc
   :: ∀ eff input output state
    . String
-  -> (P.Input (ref :: REF | eff) input -> IO Unit -> IO Unit)
+  -> (P.Input input -> IO Unit -> IO Unit)
   -> SagaThread input output state
   -> IO Unit
 attachProc tag f thread = do
@@ -336,15 +336,15 @@ attachProc tag f thread = do
   let log :: String -> IO Unit
       log msg = debugA $ "attachProc (" <> tag <>  ", pid=" <> show id <> "): " <> msg
 
-  { output, input, seal } <- liftAff $ P.spawn P.new
+  chan <- liftAff $ P.spawn P.new
   successVar <- liftAff $ makeVar
 
   log $ "attaching"
-  liftEff $ modifyRef thread.procsRef (_ `Array.snoc` { id, output: unsafeCoerceAffA output, successVar })
+  liftEff $ modifyRef thread.procsRef (_ `Array.snoc` { id, output: P.output chan, successVar })
 
   liftAff $
     (do
-      result <- attempt (runIO $ f (unsafeCoerceAffA input) (liftAff seal))
+      result <- attempt (runIO $ f (P.input chan) (liftAff $ P.seal chan))
       runIO' $ case result of
         Right _ -> do
           liftAff $ putVar successVar unit
@@ -357,7 +357,7 @@ attachProc tag f thread = do
           liftAff $ putVar thread.failureVar e'
     ) `cancelWith` (Canceler \error -> true <$ runIO do
                       log "canceling..."
-                      liftAff seal
+                      liftAff $ P.seal chan
                       liftAff $ putVar successVar unit
                    )
 
@@ -381,10 +381,10 @@ sagaMiddleware saga api =
             refOutput <- newRef Nothing
             refCallbacks  <- newRef []
             _ <- launchAff do
-              { input, output } <- P.spawn P.new
+              chan <- P.spawn P.new
               callbacks <- liftEff $ modifyRef' refCallbacks \value -> { state: [], value }
-              for_ callbacks (_ $ output)
-              liftEff $ modifyRef refOutput (const $ Just output)
+              for_ callbacks (_ $ P.output chan)
+              liftEff $ modifyRef refOutput (const $ Just $ P.output chan)
               runIO' do
                 idSupply <- newIdSupply
                 thread <- newThread "root" idSupply api
@@ -393,13 +393,13 @@ sagaMiddleware saga api =
                   (\e ->
                     let msg = maybe "" (", stack trace follows:\n" <> _) $ stack e
                     in throwError $ error $ "Saga terminated due to error" <> msg)
-                  $ runThread input thread
+                  $ runThread (P.input chan) thread
             pure \action -> void do
               readRef refOutput >>= case _ of
-                Just output -> void $ launchAff $ P.send output action
+                Just output -> void $ launchAff $ P.send' action output
                 Nothing -> void $ modifyRef refCallbacks
                                             (_ `Array.snoc` \output ->
-                                              void $ P.send output action)
+                                              void $ P.send' action output)
    in \next action -> void do
         unsafeCoerceEff $ emitAction action
         next action
