@@ -15,7 +15,7 @@
     "purescript-pipes": "^4.2.0",
     "purescript-pipes-aff": "^0.2.0",
     "purescript-safely": "^3.0.0",
-    "purescript-io": "^4.0.0"
+    "purescript-io": "^4.1.0"
   },
   "repository": {
     "type": "git",
