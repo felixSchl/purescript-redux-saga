@@ -182,13 +182,14 @@ fork' tag parentThread (Saga' saga) = do
                               seal'
                               )
         log "saga process finished"
-        seal
+        -- seal
 
       liftAff $ putVar innerCancelerVar c
 
       log "run thread"
       runThread input childThread
 
+      seal
     ) `cancelWith` (Canceler \error ->
       true <$ runIO' do
         liftAff (tryPeekVar innerCancelerVar) >>= case _ of
@@ -307,7 +308,7 @@ runThread input thread = do
       Nothing <$ parallel do
         runIO' do
           log "running input pipe"
-          liftAff do
+          (Canceler c) <- liftAff $ forkAff do
             P.runEffectRec $ P.for (P.fromInput' input) \value -> do
               procs <- liftEff $ readRef thread.procsRef
               lift $ for_ procs \{ output, id } -> do
@@ -316,6 +317,8 @@ runThread input thread = do
           procs <- liftEff $ readRef thread.procsRef
           log $ "waiting for " <> show (Array.length procs) <> " processes to finish running..."
           liftAff $ for_ procs (peekVar <<< _.successVar)
+          -- XXX: Why does the canceler not return?
+          void $ liftAff $ forkAff $ c (error "Finished")
           log $ "finished"
 
   case result of

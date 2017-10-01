@@ -120,7 +120,7 @@ main = run' (defaultConfig { timeout = Just 3000 }) [consoleReporter] do
                void $ fork $ put unit
             liftIO $ done unit
 
-    describe "forks" do
+    describeOnly "forks" do
       it "should not block" do
         x <- runIO' $ withCompletionVar \done -> do
           void $ mkStore (const id) {} do
@@ -181,6 +181,16 @@ main = run' (defaultConfig { timeout = Just 3000 }) [consoleReporter] do
               liftIO $ done true
             void $ joinTask task
             liftIO $ done false
+        x `shouldEqual` true
+
+      it "should wait for child processes (2)" do
+        x <- runIO' $ withCompletionVar \done -> do
+          void $ mkStore (const id) {} do
+            void $ fork do
+              void $ fork do
+                take $ const $ pure $ liftIO $ done true
+            liftAff $ delay $ 10.0 # Milliseconds
+            put unit
         x `shouldEqual` true
 
       it "should wait for nested child processes" do
