@@ -145,15 +145,16 @@ forkNamed
   -> Saga' input output state SagaTask
 forkNamed tag saga = do
   thread <- Saga' $ lift ask
-  liftIO $ fork' tag thread saga
+  liftIO $ fork' false tag thread saga
 
 fork'
   :: ∀ input output state
-   . String
+   . Boolean
+  -> String
   -> SagaThread input output state
   -> Saga' input output state Unit
   -> IO SagaTask
-fork' tag parentThread (Saga' saga) = do
+fork' keepAlive tag parentThread (Saga' saga) = do
   let tag' = parentThread.tag <> ">" <> tag
       log :: String -> IO Unit
       log msg = debugA $ "fork (" <> tag' <> "): " <> msg
@@ -182,14 +183,13 @@ fork' tag parentThread (Saga' saga) = do
                               seal'
                               )
         log "saga process finished"
-        -- seal
 
       liftAff $ putVar innerCancelerVar c
 
       log "run thread"
       runThread input childThread
 
-      seal
+      unless keepAlive $ seal
     ) `cancelWith` (Canceler \error ->
       true <$ runIO' do
         liftAff (tryPeekVar innerCancelerVar) >>= case _ of
@@ -393,7 +393,7 @@ sagaMiddleware saga api =
               runIO' do
                 idSupply <- newIdSupply
                 thread <- newThread "root" idSupply (unsafeCoerce api)
-                task <- fork' "main" thread saga
+                task <- fork' true "main" thread saga
                 flip catchError
                   (\e ->
                     let msg = maybe "" (", stack trace follows:\n" <> _) $ stack e
