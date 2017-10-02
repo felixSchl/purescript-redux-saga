@@ -71,7 +71,7 @@ channel tag cb (Saga' saga) = do
 
   childThread <- newThread' "channel"
 
-  chan <- liftAff $ P.spawn P.unbounded
+  chan <- liftAff $ P.spawn P.new
 
   void $ liftAff $ forkAff $ runIO $ do
     c <- liftAff $ forkAff $ runIO do
@@ -83,7 +83,7 @@ channel tag cb (Saga' saga) = do
               flip runReaderT childThread
                 $ P.runEffectRec
                 $ P.for (P.fromInput' input' >-> saga) \action -> do
-                    lift do
+                    liftAff $ void $ forkAff do
                       liftAff $ delay $ 0.0 # Milliseconds
                       liftEff $ unsafeCoerceEff $ childThread.api.dispatch action
             ) `cancelWith` (Canceler \_ -> true <$ runIO do
@@ -128,9 +128,9 @@ cancel (SagaTask { canceler }) = void do
 select
   :: ∀ input output state
    . Saga' input output state state
-select = Saga' do
-  { api } <- ask
-  liftEff $ unsafeCoerceEff api.getState
+select = do
+  { api } <- Saga' ask
+  liftEff api.getState
 
 fork
   :: ∀ input output state
@@ -175,7 +175,7 @@ fork' keepAlive tag parentThread (Saga' saga) = do
                 flip runReaderT childThread
                   $ P.runEffectRec
                   $ P.for (P.fromInput' input' >-> saga) \action -> do
-                      lift do
+                      liftAff $ void $ forkAff do
                         liftAff $ delay $ 0.0 # Milliseconds
                         liftEff $ unsafeCoerceEff $ childThread.api.dispatch action
               ) `cancelWith` (Canceler \_ -> true <$ runIO do
@@ -397,7 +397,7 @@ sagaMiddleware saga api =
                 flip catchError
                   (\e ->
                     let msg = maybe "" (", stack trace follows:\n" <> _) $ stack e
-                    in throwError $ error $ "Saga terminated due to error" <> msg)
+                     in throwError $ error $ "Saga terminated due to error" <> msg)
                   $ runThread (P.input chan) thread
             pure \action -> void do
               readRef refOutput >>= case _ of

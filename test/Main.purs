@@ -46,7 +46,7 @@ withCompletionVar f = do
   liftAff $ takeVar completedVar
 
 main :: Eff _ Unit
-main = run' (defaultConfig { timeout = Just 3000 }) [consoleReporter] do
+main = run' (defaultConfig { timeout = Just 5000 }) [consoleReporter] do
   describe "sagas" do
     describe "take" do
       it "should run matching action handler" do
@@ -116,8 +116,7 @@ main = run' (defaultConfig { timeout = Just 3000 }) [consoleReporter] do
         runIO' $ withCompletionVar \done -> do
           void $ mkStore (const id) {} do
             ref <- liftEff $ newRef 0
-            replicateM_ 2000 do
-               void $ fork $ put unit
+            replicateM_ 10000 $ put unit
             liftIO $ done unit
 
     describe "forks" do
@@ -233,7 +232,7 @@ main = run' (defaultConfig { timeout = Just 3000 }) [consoleReporter] do
               liftIO $ done true
           x `shouldEqual` true
 
-        it "should be able to cancel forks" do
+        it "should be able to cancel forks (2)" do
           r <- runIO' $ withCompletionVar \done -> do
             void $ mkStore (const id) {} do
               ref <- liftEff $ newRef []
@@ -242,8 +241,13 @@ main = run' (defaultConfig { timeout = Just 3000 }) [consoleReporter] do
                   take \i -> pure do
                     liftEff $ modifyRef ref (_ `A.snoc` i)
               for_ [ 1, 2, 3 ] put
+
+              liftAff $ delay $ 10.0 # Milliseconds
               cancel task
+
               for_ [ 4, 5, 6, 7, 8, 9 ] put
+              liftAff $ delay $ 10.0 # Milliseconds
+
               liftEff (readRef ref) >>= liftIO <<< done
           r `shouldEqual` [1, 2, 3]
 
