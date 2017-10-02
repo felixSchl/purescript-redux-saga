@@ -4,7 +4,7 @@ import Prelude
 import Redux.Saga
 
 import Control.Monad.Aff (delay, forkAff)
-import Control.Monad.Aff.AVar (makeVar, takeVar, putVar)
+import Control.Monad.Aff.AVar (makeEmptyVar, takeVar, putVar)
 import Control.Monad.Aff.Class (liftAff)
 import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Class (liftEff)
@@ -19,6 +19,7 @@ import Data.Array as A
 import Data.Foldable (for_)
 import Data.Maybe (Maybe(..))
 import Data.Time.Duration (Milliseconds(..))
+import Debug.Trace (traceAnyA)
 import React.Redux as Redux
 import Test.Spec (describe, describeOnly, it, itOnly, pending')
 import Test.Spec.Assertions (shouldEqual)
@@ -41,8 +42,9 @@ mkStore reducer initialState saga = liftEff do
 
 withCompletionVar :: ∀ a. ((a -> IO Unit) -> IO Unit) -> IO a
 withCompletionVar f = do
-  completedVar <- liftAff makeVar
-  f $ liftAff <<< putVar completedVar
+  completedVar <- liftAff makeEmptyVar
+  liftAff $ void $ forkAff do
+    runIO' $ f $ liftAff <<< flip putVar completedVar
   liftAff $ takeVar completedVar
 
 main :: Eff _ Unit
@@ -62,7 +64,7 @@ main = run' (defaultConfig { timeout = Just 5000 }) [consoleReporter] do
         r <- runIO' $ withCompletionVar \done -> do
           void $ mkStore (const id) {} do
             void $ fork do
-              take case _ of
+              take \i -> case i of
                 n | n == 2 -> pure do
                   liftIO $ done n
                 _ -> Nothing
@@ -74,7 +76,7 @@ main = run' (defaultConfig { timeout = Just 5000 }) [consoleReporter] do
         r <- runIO' $ withCompletionVar \done -> do
           void $ mkStore (const id) {} do
             ref <- liftEff $ newRef []
-            void $ fork do
+            void $ forkNamed "INNER" do
               replicateM_ 3 do
                 take \i -> pure do
                   liftEff $ modifyRef ref (_ `A.snoc` i)
@@ -82,6 +84,7 @@ main = run' (defaultConfig { timeout = Just 5000 }) [consoleReporter] do
             put 1
             put 2
             put 3
+            put 4
         r `shouldEqual` [1, 2, 3]
 
       it "should block the thread" do

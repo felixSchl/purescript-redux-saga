@@ -11,11 +11,11 @@
     "purescript-prelude": "^3.1.0",
     "purescript-console": "^3.0.0",
     "purescript-react-redux": "^5.1.0",
-    "purescript-aff": "^3.0.0",
-    "purescript-pipes": "^4.2.0",
-    "purescript-pipes-aff": "^0.2.0",
+    "purescript-aff": "^4.0.0",
+    "purescript-pipes": "^5.0.0",
+    "purescript-pipes-aff": "felixschl/purescript-pipes-aff#aff-4",
     "purescript-safely": "^3.0.0",
-    "purescript-io": "^4.1.0"
+    "purescript-io": "^5.0.0"
   },
   "repository": {
     "type": "git",
@@ -23,6 +23,6 @@
   },
   "devDependencies": {
     "purescript-psci-support": "^3.0.0",
-    "purescript-spec": "^1.0.0"
+    "purescript-spec": "felixschl/purescript-spec#aff-4"
   }
 }
