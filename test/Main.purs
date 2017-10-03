@@ -48,7 +48,7 @@ withCompletionVar f = do
   liftAff $ takeVar completedVar
 
 main :: Eff _ Unit
-main = run' (defaultConfig { timeout = Nothing }) [consoleReporter] do
+main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
   describe "sagas" do
     describe "take" do
       it "should run matching action handler" do
@@ -115,8 +115,8 @@ main = run' (defaultConfig { timeout = Nothing }) [consoleReporter] do
               liftAff $ void $ throwError $ error "oh no"
 
     describe "put" do
-      itOnly "should not overflow the stack" do
-        let target = 500000
+      it "should not overflow the stack" do
+        let target = 5000
         v <- runIO' $ withCompletionVar \done -> do
           void $ mkStore (const id) {} do
             ref <- liftEff $ newRef 1

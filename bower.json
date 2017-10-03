@@ -13,7 +13,7 @@
     "purescript-react-redux": "^5.1.0",
     "purescript-aff": "^4.0.0",
     "purescript-pipes": "^5.0.0",
-    "purescript-pipes-aff": "felixschl/purescript-pipes-aff#aff-4",
+    "purescript-pipes-aff": "^0.3.0",
     "purescript-safely": "^3.0.0",
     "purescript-io": "^5.0.0"
   },
@@ -23,6 +23,7 @@
   },
   "devDependencies": {
     "purescript-psci-support": "^3.0.0",
-    "purescript-spec": "felixschl/purescript-spec#aff-4"
+    "purescript-spec": "^2.0.0",
+    "purescript-debug": "^3.0.0"
   }
 }

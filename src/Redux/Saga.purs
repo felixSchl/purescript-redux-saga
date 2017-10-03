@@ -168,7 +168,7 @@ fork' keepAlive tag parentThread (Saga' saga) = do
     runIO' $ flip (attachProc $ tag' <> " - thread") parentThread \input seal -> do
       log "spawning child process (thread)"
       childThread <- newThread tag' parentThread.idSupply parentThread.api
-      c <- liftAff $ forkAff $ runIO do
+      void $ liftAff $ forkAff $ runIO do
         log "attaching child process (task)"
         liftAff do
           runIO' $ flip (attachProc $ tag' <> " - task") childThread \input' seal' -> do
