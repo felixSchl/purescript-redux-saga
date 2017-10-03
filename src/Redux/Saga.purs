@@ -13,7 +13,7 @@ module Redux.Saga (
   , put
   , select
   , joinTask
-  , cancel
+  , cancelTask
   , channel
   ) where
 
@@ -86,7 +86,7 @@ channel tag cb (Saga' saga) = do
               flip runReaderT childThread
                 $ P.runEffectRec
                 $ P.for (P.fromInput' input' >-> saga) \action -> do
-                    -- liftAff $ void $ forkAff do
+                    liftAff $ void $ forkAff do
                       liftAff $ delay $ 0.0 # Milliseconds
                       liftEff $ unsafeCoerceEff $ childThread.api.dispatch action
             ) `cancelWith` (Canceler \_ -> void $ runIO do
@@ -120,13 +120,15 @@ joinTask
   :: ∀ input output state
    . SagaTask
   -> Saga' input output state Unit
-joinTask (SagaTask fiber) = liftIO $ liftAff $ joinFiber fiber
+joinTask (SagaTask fiber) = liftIO $ liftAff do
+  joinFiber fiber
 
-cancel
+cancelTask
   :: ∀ input output state
    . SagaTask
   -> Saga' input output state Unit
-cancel (SagaTask fiber) = void $ liftAff $ killFiber (error "CANCEL_TASK") fiber
+cancelTask (SagaTask fiber) = void $ liftAff do
+  killFiber (error "CANCEL_TASK") fiber
 
 select
   :: ∀ input output state
@@ -162,8 +164,6 @@ fork' keepAlive tag parentThread (Saga' saga) = do
       log :: String -> IO Unit
       log msg = debugA $ "fork (" <> tag' <> "): " <> msg
   fiber <- liftAff $ forkAff do
-    innerCancelerVar <- makeEmptyVar
-
     runIO' $ log "attaching child thread process"
     runIO' $ flip (attachProc $ tag' <> " - thread") parentThread \input seal -> do
       log "spawning child process (thread)"
@@ -177,11 +177,10 @@ fork' keepAlive tag parentThread (Saga' saga) = do
                 flip runReaderT childThread
                   $ P.runEffectRec
                   $ P.for (P.fromInput' input' >-> saga) \action -> do
-                      -- liftAff $ void $ forkAff do
+                      liftAff $ void $ forkAff do
                         liftAff $ delay $ 0.0 # Milliseconds
                         liftEff $ unsafeCoerceEff $ childThread.api.dispatch action
         log "saga process finished"
-      liftAff $ putVar c innerCancelerVar
       log "run thread"
 
       runThread input childThread
@@ -326,7 +325,7 @@ attachProc tag f thread = do
   let log :: String -> IO Unit
       log msg = debugA $ "attachProc (" <> tag <>  ", pid=" <> show id <> "): " <> msg
 
-  chan <- liftAff $ P.spawn P.unbounded
+  chan <- liftAff $ P.spawn P.new
   successVar <- liftAff $ makeEmptyVar
 
   log $ "attaching"
@@ -371,7 +370,7 @@ sagaMiddleware saga api =
             refOutput <- newRef Nothing
             refCallbacks  <- newRef []
             _ <- launchAff do
-              chan <- P.spawn P.unbounded
+              chan <- P.spawn P.new
               callbacks <- liftEff $ modifyRef' refCallbacks \value -> { state: [], value }
               for_ callbacks (_ $ P.output chan)
               liftEff $ modifyRef refOutput (const $ Just $ P.output chan)

@@ -48,7 +48,7 @@ withCompletionVar f = do
   liftAff $ takeVar completedVar
 
 main :: Eff _ Unit
-main = run' (defaultConfig { timeout = Just 5000 }) [consoleReporter] do
+main = run' (defaultConfig { timeout = Nothing }) [consoleReporter] do
   describe "sagas" do
     describe "take" do
       it "should run matching action handler" do
@@ -115,12 +115,18 @@ main = run' (defaultConfig { timeout = Just 5000 }) [consoleReporter] do
               liftAff $ void $ throwError $ error "oh no"
 
     describe "put" do
-      it "should not overflow the stack" do
-        runIO' $ withCompletionVar \done -> do
+      itOnly "should not overflow the stack" do
+        let target = 500000
+        v <- runIO' $ withCompletionVar \done -> do
           void $ mkStore (const id) {} do
-            ref <- liftEff $ newRef 0
-            replicateM_ 10000 $ put unit
-            liftIO $ done unit
+            ref <- liftEff $ newRef 1
+            void $ fork $ forever $ take do
+              const $ pure do
+                liftEff $ modifyRef ref (_ + 1)
+            replicateM_ target $ put unit
+            liftEff (readRef ref) >>= liftIO <<< done
+        v `shouldEqual` target
+
 
     describe "forks" do
       it "should not block" do
@@ -230,7 +236,7 @@ main = run' (defaultConfig { timeout = Just 5000 }) [consoleReporter] do
                   liftAff $ void $ forever do
                     delay $ 0.0 # Milliseconds
                   liftIO $ done false
-                cancel task'
+                cancelTask task'
               joinTask task
               liftIO $ done true
           x `shouldEqual` true
@@ -246,7 +252,7 @@ main = run' (defaultConfig { timeout = Just 5000 }) [consoleReporter] do
               for_ [ 1, 2, 3 ] put
 
               liftAff $ delay $ 10.0 # Milliseconds
-              cancel task
+              cancelTask task
 
               for_ [ 4, 5, 6, 7, 8, 9 ] put
               liftAff $ delay $ 10.0 # Milliseconds
