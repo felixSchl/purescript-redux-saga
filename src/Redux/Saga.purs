@@ -86,9 +86,7 @@ channel tag cb (Saga' saga) = do
               flip runReaderT childThread
                 $ P.runEffectRec
                 $ P.for (P.fromInput' input' >-> saga) \action -> do
-                    liftAff $ void $ forkAff do
-                      liftAff $ delay $ 0.0 # Milliseconds
-                      liftEff $ unsafeCoerceEff $ childThread.api.dispatch action
+                    liftEff $ unsafeCoerceEff $ childThread.api.dispatch action
             ) `cancelWith` (Canceler \_ -> void $ runIO do
                             log "canceling: sealing task"
                             seal'
@@ -99,9 +97,9 @@ channel tag cb (Saga' saga) = do
   liftIO $ cb (\value -> void $ liftAff $ forkAff $ P.send value chan)
 
 take
-  :: ∀ input output state
-   . (input -> Maybe (Saga' input output state Unit))
-  -> Saga' input output state Unit
+  :: ∀ input output state a
+   . (input -> Maybe (Saga' input output state a))
+  -> Saga' input output state a
 take f = Saga' go
   where
   go = map f P.await >>= case _ of
@@ -177,9 +175,7 @@ fork' keepAlive tag parentThread (Saga' saga) = do
                 flip runReaderT childThread
                   $ P.runEffectRec
                   $ P.for (P.fromInput' input' >-> saga) \action -> do
-                      liftAff $ void $ forkAff do
-                        liftAff $ delay $ 0.0 # Milliseconds
-                        liftEff $ unsafeCoerceEff $ childThread.api.dispatch action
+                      liftEff $ unsafeCoerceEff $ childThread.api.dispatch action
         log "saga process finished"
       log "run thread"
 

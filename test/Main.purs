@@ -55,8 +55,8 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
         r <- runIO' $ withCompletionVar \done -> do
           void $ mkStore (const id) {} do
             void $ fork do
-              take \i -> pure do
-                liftIO $ done i
+              x <- take \i -> pure (pure i)
+              liftIO $ done x
             put 1
         r `shouldEqual` 1
 
@@ -94,7 +94,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
             void $ liftAff $ forkAff do
               delay $ 10.0 # Milliseconds
               runIO' $ done true
-            take (const Nothing)
+            void $ take (const Nothing)
             liftIO $ done false
         r `shouldEqual` true
 
@@ -133,7 +133,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
         x <- runIO' $ withCompletionVar \done -> do
           void $ mkStore (const id) {} do
             void $ fork do
-              take (const Nothing)
+              void $ take (const Nothing)
               liftIO $ done false
             liftIO $ done true
         x `shouldEqual` true
