@@ -10,6 +10,8 @@ module Redux.Saga (
   , take
   , fork
   , forkNamed
+  , fork'
+  , forkNamed'
   , put
   , select
   , joinTask
@@ -35,6 +37,7 @@ import Control.Monad.IO.Class (class MonadIO, liftIO)
 import Control.Monad.IO.Effect (INFINITY)
 import Control.Monad.Reader (ask)
 import Control.Monad.Reader.Trans (runReaderT, ReaderT)
+import Control.Monad.Reader.Class (class MonadAsk, class MonadReader)
 import Control.Monad.Rec.Class (class MonadRec)
 import Control.Monad.Trans.Class (lift)
 import Control.Parallel (parallel, sequential)
@@ -44,7 +47,8 @@ import Data.Foldable (for_)
 import Data.Maybe (Maybe(..), maybe)
 import Data.Newtype (class Newtype, wrap)
 import Data.Time.Duration (Milliseconds(..))
-import Data.Tuple.Nested ((/\))
+import Data.Tuple (fst)
+import Data.Tuple.Nested ((/\), type (/\))
 import Global (infinity)
 import Pipes ((>->))
 import Pipes as P
@@ -54,7 +58,6 @@ import React.Redux (ReduxEffect)
 import React.Redux as Redux
 import Unsafe.Coerce (unsafeCoerce)
 
-
 unsafeCoerceFiberEff :: ∀ m eff eff2 a. Fiber eff a -> Fiber eff2 a
 unsafeCoerceFiberEff = unsafeCoerce
 
@@ -63,11 +66,11 @@ debugA _ = pure unit
 -- debugA = traceAnyA
 
 channel
-  :: ∀ input action state
+  :: ∀ env input action state
    . String
   -> ((input -> IO Unit) -> IO Unit)
-  -> Saga' state input action Unit
-  -> Saga' state action action Unit
+  -> Saga' env state input action Unit
+  -> Saga' env state action action Unit
 channel tag cb (Saga' saga) = do
   let log :: String -> IO Unit
       log msg = debugA $ "fork (" <> tag <> "): " <> msg
@@ -75,6 +78,7 @@ channel tag cb (Saga' saga) = do
   childThread <- newThread' "channel"
 
   chan <- liftAff $ P.spawn P.new
+  env  <- ask
 
   void $ liftAff $ forkAff $ runIO $ do
     c <- liftAff $ forkAff $ runIO do
@@ -83,7 +87,7 @@ channel tag cb (Saga' saga) = do
         runIO' $ flip (attachProc $ tag <> " - channel") childThread \input' seal' -> do
           liftAff do
             (runIO' do
-              flip runReaderT childThread
+              flip runReaderT (env /\ childThread)
                 $ P.runEffectRec
                 $ P.for (P.fromInput' input' >-> saga) \action -> do
                     void $ liftEff $ unsafeCoerceEff $ childThread.api.dispatch action
@@ -97,9 +101,9 @@ channel tag cb (Saga' saga) = do
   liftIO $ cb (\value -> void $ liftAff $ forkAff $ P.send value chan)
 
 take
-  :: ∀ state input output a
-   . (input -> Maybe (Saga' state input output a))
-  -> Saga' state input output a
+  :: ∀ env state input output a
+   . (input -> Maybe (Saga' env state input output a))
+  -> Saga' env state input output a
 take f = Saga' go
   where
   go = map f P.await >>= case _ of
@@ -107,57 +111,75 @@ take f = Saga' go
     Nothing           -> go
 
 put
-  :: ∀ input action state
+  :: ∀ env input action state
    . action
-  -> Saga' state input action Unit
+  -> Saga' env state input action Unit
 put action = Saga' do
   liftAff $ delay $ 0.0 # Milliseconds
   P.yield action
 
 joinTask
-  :: ∀  state input output
+  :: ∀ env state input output
    . SagaTask
-  -> Saga' state input output Unit
+  -> Saga' env state input output Unit
 joinTask (SagaTask fiber) = liftIO $ liftAff do
   joinFiber fiber
 
 cancelTask
-  :: ∀  state input output
+  :: ∀ env state input output
    . SagaTask
-  -> Saga' state input output Unit
+  -> Saga' env state input output Unit
 cancelTask (SagaTask fiber) = void $ liftAff do
   killFiber (error "CANCEL_TASK") fiber
 
 select
-  :: ∀ state input output
-   . Saga' state input output state
+  :: ∀ env state input output
+   . Saga' env state input output state
 select = do
-  { api } <- Saga' $ lift ask
+  _ /\ { api } <- Saga' (lift ask)
   liftEff api.getState
 
 fork
-  :: ∀ state input output
-   . Saga' state input output Unit
-  -> Saga' state input output SagaTask
+  :: ∀ env state input output
+   . Saga' env state input output Unit
+  -> Saga' env state input output SagaTask
 fork = forkNamed "anonymous"
 
-forkNamed
-  :: ∀  state input output
-   . String
-  -> Saga' state input output Unit
-  -> Saga' state input output SagaTask
-forkNamed tag saga = do
-  thread <- Saga' $ lift ask
-  liftIO $ fork' false tag thread saga
-
 fork'
-  :: ∀ state input output
+  :: ∀ env newEnv state input output
+   . newEnv
+  -> Saga' newEnv state input output Unit
+  -> Saga' env state input output SagaTask
+fork' = forkNamed' "anonymous"
+
+forkNamed
+  :: ∀ env state input output
+   . String
+  -> Saga' env state input output Unit
+  -> Saga' env state input output SagaTask
+forkNamed tag saga = do
+  env <- ask
+  forkNamed' tag env saga
+
+forkNamed'
+  :: ∀ env newEnv state input output
+   . String
+  -> newEnv
+  -> Saga' newEnv state input output Unit
+  -> Saga' env state input output SagaTask
+forkNamed' tag env saga = do
+  _ /\ thread <- Saga' (lift ask)
+  liftIO $ _fork false tag thread env saga
+
+_fork
+  :: ∀ env state input output
    . Boolean
   -> String
   -> SagaThread state input output
-  -> Saga' state input output Unit
+  -> env
+  -> Saga' env state input output Unit
   -> IO SagaTask
-fork' keepAlive tag parentThread (Saga' saga) = do
+_fork keepAlive tag parentThread env (Saga' saga) = do
   let tag' = parentThread.tag <> ">" <> tag
       log :: String -> IO Unit
       log msg = debugA $ "fork (" <> tag' <> "): " <> msg
@@ -168,13 +190,13 @@ fork' keepAlive tag parentThread (Saga' saga) = do
       childThread <- newThread tag' parentThread.idSupply parentThread.api
       void $ liftAff $ forkAff $ runIO do
         log "attaching child process (task)"
-        liftAff do
-          runIO' $ flip (attachProc $ tag' <> " - task") childThread \input' seal' -> do
-            liftAff do
-              runIO' do
-                flip runReaderT childThread
-                  $ P.runEffectRec
-                  $ P.for (P.fromInput' input' >-> saga) \action -> do
+        liftAff $
+          runIO' $ flip (attachProc $ tag' <> " - task") childThread \input' seal' ->
+            liftAff $
+              runIO' $
+                flip runReaderT (env /\ childThread) $ do
+                  P.runEffectRec $
+                    P.for (P.fromInput' input' >-> saga) \action -> do
                       void $ liftEff $ unsafeCoerceEff $ childThread.api.dispatch action
         log "saga process finished"
       log "run thread"
@@ -188,43 +210,46 @@ fork' keepAlive tag parentThread (Saga' saga) = do
 
   pure $ SagaTask (unsafeCoerceFiberEff fiber)
 
-type Saga state action a = Saga' state action action a
+type Saga env state action a = Saga' env state action action a
 
 newtype SagaTask = SagaTask (Fiber (avar :: AVAR) Unit)
 
-newtype Saga' state input output a
+newtype Saga' env state input output a
   = Saga' (
       P.Pipe
         input
         output
-        (ReaderT (SagaThread state input output) IO)
+        (ReaderT (env /\ (SagaThread state input output)) IO)
         a
     )
 
-derive instance newtypeSaga' :: Newtype (Saga' state input action a) _
-derive newtype instance applicativeSaga :: Applicative (Saga' state input action)
-derive newtype instance functorSaga :: Functor (Saga' state input action)
-derive newtype instance applySaga :: Apply (Saga' state input action)
-derive newtype instance bindSaga :: Bind (Saga' state input action)
-derive newtype instance monadSaga :: Monad (Saga' state input action)
-derive newtype instance monadRecSaga :: MonadRec (Saga' state input action)
-derive newtype instance monadThrowSaga :: MonadThrow Error (Saga' state input action)
-derive newtype instance monadErrorSaga :: MonadError Error (Saga' state input action)
+derive instance newtypeSaga' :: Newtype (Saga' env state input action a) _
+derive newtype instance applicativeSaga :: Applicative (Saga' env state input action)
+derive newtype instance functorSaga :: Functor (Saga' env state input action)
+derive newtype instance applySaga :: Apply (Saga' env state input action)
+derive newtype instance bindSaga :: Bind (Saga' env state input action)
+derive newtype instance monadSaga :: Monad (Saga' env state input action)
+derive newtype instance monadRecSaga :: MonadRec (Saga' env state input action)
+derive newtype instance monadThrowSaga :: MonadThrow Error (Saga' env state input action)
+derive newtype instance monadErrorSaga :: MonadError Error (Saga' env state input action)
 
-instance monadIOSaga :: MonadIO (Saga' state input action) where
+instance monadAskSaga :: MonadAsk env (Saga' env state input action) where
+  ask = fst <$> Saga' (lift ask)
+
+instance monadIOSaga :: MonadIO (Saga' env state input action) where
   liftIO action = Saga' $ liftIO action
 
-instance monadEffSaga :: MonadEff eff (Saga' state input action) where
+instance monadEffSaga :: MonadEff eff (Saga' env state input action) where
   liftEff action = Saga' $ liftEff action
 
-instance monadAffSaga :: MonadAff eff (Saga' state input action) where
+instance monadAffSaga :: MonadAff eff (Saga' env state input action) where
   liftAff action = Saga' $ liftAff action
 
-type SagaPipe state input action a
+type SagaPipe env state input action a
   = P.Pipe
       input
       action
-      (ReaderT  (SagaThread state input action) IO)
+      (ReaderT (env /\ (SagaThread state input action)) IO)
       a
 
 type SagaProc input
@@ -266,17 +291,17 @@ newThread tag idSupply api = do
   pure { tag, idSupply, procsRef, failureVar, api }
 
 newThread'
-  :: ∀  state input' input output
+  :: ∀ env state input' input output
    . String
-  -> Saga' state input output (SagaThread state input' output)
+  -> Saga' env state input output (SagaThread state input' output)
 newThread' tag = do
-  { idSupply, api } <- Saga' $ lift ask
+  _ /\ { idSupply, api } <- Saga' (lift ask)
   failureVar <- liftAff $ makeEmptyVar
   procsRef <- liftEff $ newRef []
   pure { tag, idSupply, procsRef, failureVar, api }
 
 runThread
-  :: ∀ state input output
+  :: ∀ env state input output
    . P.Input input
   -> SagaThread state input output
   -> IO Unit
@@ -358,8 +383,8 @@ attachProc tag f thread = do
  -}
 sagaMiddleware
   :: ∀ action state eff
-   . Saga' state action action Unit
-  -> Redux.Middleware eff state action _ _ -- action action
+   . Saga' Unit state action action Unit
+  -> Redux.Middleware eff state action _ _
 sagaMiddleware saga = wrap $ \api ->
   let emitAction
         = unsafePerformEff do
@@ -373,7 +398,7 @@ sagaMiddleware saga = wrap $ \api ->
               runIO' do
                 idSupply <- newIdSupply
                 thread <- newThread "root" idSupply (unsafeCoerce api)
-                task <- fork' true "main" thread saga
+                task <- _fork true "main" thread unit saga
                 flip catchError
                   (\e ->
                     let msg = maybe "" (", stack trace follows:\n" <> _) $ stack e
