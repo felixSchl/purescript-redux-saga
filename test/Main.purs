@@ -18,6 +18,7 @@ import Control.Safely (replicateM_)
 import Data.Array as A
 import Data.Foldable (for_)
 import Data.Maybe (Maybe(..))
+import Data.Newtype (wrap)
 import Data.Time.Duration (Milliseconds(..))
 import Debug.Trace (traceAnyA)
 import React.Redux as Redux
@@ -30,11 +31,11 @@ data Action = SearchChanged String
 type GlobalState = {}
 
 mkStore
-  :: ∀ action state eff
+  :: ∀ state action eff
    . Redux.Reducer action state
   -> state
-  -> Saga action state Unit
-  -> IO (Redux.Store action state)
+  -> Saga state action Unit
+  -> IO (Redux.ReduxStore eff state action)
 mkStore reducer initialState saga = liftEff do
   Redux.createStore reducer
                     initialState
@@ -53,7 +54,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
     describe "take" do
       it "should run matching action handler" do
         r <- runIO' $ withCompletionVar \done -> do
-          void $ mkStore (const id) {} do
+          void $ mkStore (wrap $ const id) {} do
             void $ fork do
               x <- take \i -> pure (pure i)
               liftIO $ done x
@@ -62,7 +63,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
 
       it "should ignore non-matching actions" do
         r <- runIO' $ withCompletionVar \done -> do
-          void $ mkStore (const id) {} do
+          void $ mkStore (wrap $ const id) {} do
             void $ fork do
               take \i -> case i of
                 n | n == 2 -> pure do
@@ -74,7 +75,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
 
       it "should be able to run repeatedly" do
         r <- runIO' $ withCompletionVar \done -> do
-          void $ mkStore (const id) {} do
+          void $ mkStore (wrap $ const id) {} do
             ref <- liftEff $ newRef []
             void $ forkNamed "INNER" do
               replicateM_ 3 do
@@ -89,7 +90,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
 
       it "should block the thread" do
         r <- runIO' $ withCompletionVar \done -> do
-          void $ mkStore (const id) {} do
+          void $ mkStore (wrap $ const id) {} do
             ref <- liftEff $ newRef []
             void $ liftAff $ forkAff do
               delay $ 10.0 # Milliseconds
@@ -103,14 +104,14 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
       -- actually crashing
       pending' "should terminate on errors" do
         void $ runIO' $ withCompletionVar \_ -> do
-          void $ mkStore (const id) {} do
+          void $ mkStore (wrap $ const id) {} do
             liftAff $ void $ throwError $ error "oh no"
 
       -- TODO: How to actually catch these? or at least test that it's
       -- actually crashing
       pending' "sub-sagas should bubble up errors" do
         void $ runIO' $ withCompletionVar \_ -> do
-          void $ mkStore (const id) {} do
+          void $ mkStore (wrap $ const id) {} do
             void $ fork do
               liftAff $ void $ throwError $ error "oh no"
 
@@ -118,7 +119,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
       it "should not overflow the stack" do
         let target = 5000
         v <- runIO' $ withCompletionVar \done -> do
-          void $ mkStore (const id) {} do
+          void $ mkStore (wrap $ const id) {} do
             ref <- liftEff $ newRef 1
             void $ fork $ forever $ take do
               const $ pure do
@@ -131,7 +132,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
     describe "forks" do
       it "should not block" do
         x <- runIO' $ withCompletionVar \done -> do
-          void $ mkStore (const id) {} do
+          void $ mkStore (wrap $ const id) {} do
             void $ fork do
               void $ take (const Nothing)
               liftIO $ done false
@@ -140,7 +141,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
 
       it "should not block in Aff" do
         x <- runIO' $ withCompletionVar \done -> do
-          void $ mkStore (const id) {} do
+          void $ mkStore (wrap $ const id) {} do
             void $ fork do
               liftAff $ void $ forever do
                 delay $ 0.0 # Milliseconds
@@ -150,7 +151,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
 
       it "should be joinable" do
         runIO' $ withCompletionVar \done -> do
-          void $ mkStore (const id) {} do
+          void $ mkStore (wrap $ const id) {} do
             t <- fork do
               liftAff $ delay $ 100.0 # Milliseconds
             joinTask t
@@ -158,7 +159,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
 
       it "should be joinable (2)" do
         n <- runIO' $ withCompletionVar \done -> do
-          void $ mkStore (const id) {} do
+          void $ mkStore (wrap $ const id) {} do
             ref <- liftEff $ newRef 0
             t <- fork do
               take $ const $ pure do
@@ -170,7 +171,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
 
       it "should be joinable (3)" do
         n <- runIO' $ withCompletionVar \done -> do
-          void $ mkStore (const id) {} do
+          void $ mkStore (wrap $ const id) {} do
             ref <- liftEff $ newRef 0
             t <- fork do
               replicateM_ 10 do
@@ -183,7 +184,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
 
       it "should wait for child processes" do
         x <- runIO' $ withCompletionVar \done -> do
-          void $ mkStore (const id) {} do
+          void $ mkStore (wrap $ const id) {} do
             task <- fork do
               liftAff $ delay $ 100.0 # Milliseconds
               liftIO $ done true
@@ -193,7 +194,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
 
       it "should wait for child processes (2)" do
         x <- runIO' $ withCompletionVar \done -> do
-          void $ mkStore (const id) {} do
+          void $ mkStore (wrap $ const id) {} do
             void $ fork do
               void $ fork do
                 take $ const $ pure $ liftIO $ done true
@@ -203,7 +204,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
 
       it "should wait for child processes (3)" do
         x <- runIO' $ withCompletionVar \done -> do
-          void $ mkStore (const id) {} do
+          void $ mkStore (wrap $ const id) {} do
             void $ fork do
               void $ fork do
                  void $ forever $ take case _ of
@@ -218,7 +219,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
 
       it "should wait for nested child processes" do
         x <- runIO' $ withCompletionVar \done -> do
-          void $ mkStore (const id) {} do
+          void $ mkStore (wrap $ const id) {} do
             task <-fork do
               void $ fork do
                 liftAff $ delay $ 100.0 # Milliseconds
@@ -230,7 +231,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
       describe "cancellation" do
         it "should be able to cancel forks" do
           x <- runIO' $ withCompletionVar \done -> do
-            void $ mkStore (const id) {} do
+            void $ mkStore (wrap $ const id) {} do
               task <- fork do
                 task' <- fork do
                   liftAff $ void $ forever do
@@ -243,7 +244,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
 
         it "should be able to cancel forks (2)" do
           r <- runIO' $ withCompletionVar \done -> do
-            void $ mkStore (const id) {} do
+            void $ mkStore (wrap $ const id) {} do
               ref <- liftEff $ newRef []
               task <- fork do
                 forever do
@@ -263,7 +264,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
       describe "channels" do
         it "should call emitter block" do
           r <- runIO' $ withCompletionVar \done -> do
-            void $ mkStore (const id) {} do
+            void $ mkStore (wrap $ const id) {} do
               channel "foo"
                 (\emit -> done true)
                 (pure unit)
@@ -271,7 +272,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
 
         it "should emit to the saga block" do
           r <- runIO' $ withCompletionVar \done -> do
-            void $ mkStore (const id) {} do
+            void $ mkStore (wrap $ const id) {} do
               channel "foo"
                 (\emit -> emit "foo")
                 (take case _ of
@@ -284,7 +285,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
 
         it "should emit actions from the saga block" do
           r <- runIO' $ withCompletionVar \done -> do
-            void $ mkStore (const id) {} do
+            void $ mkStore (wrap $ const id) {} do
               channel "foo"
                 (\emit -> emit 1)
                 (take case _ of
