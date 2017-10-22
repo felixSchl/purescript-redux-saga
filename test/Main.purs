@@ -18,6 +18,7 @@ import Control.Monad.Reader.Class (ask)
 import Control.Safely (replicateM_)
 import Data.Array as A
 import Data.Foldable (for_)
+import Data.Either (Either(..))
 import Data.Maybe (Maybe(..))
 import Data.Newtype (wrap)
 import Data.Time.Duration (Milliseconds(..))
@@ -48,6 +49,11 @@ withCompletionVar f = do
   liftAff $ void $ forkAff do
     runIO' $ f $ liftAff <<< flip putVar completedVar
   liftAff $ takeVar completedVar
+
+testEnv :: ∀ state action. Saga Int state action Int
+testEnv = do
+  n :: Int <- ask
+  pure n
 
 main :: Eff _ Unit
 main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
@@ -136,7 +142,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
           r <- runIO' $ withCompletionVar \done -> do
             void $ mkStore (wrap $ const id) {} do
               void $ fork' 10 do
-                ask >>= liftIO <<< done
+                testEnv >>= liftIO <<< done
           r `shouldEqual` 10
 
       it "should not block" do
@@ -251,6 +257,19 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
               liftIO $ done true
           x `shouldEqual` true
 
+        it "should be able to cancel forks with channels" do
+          x <- runIO' $ withCompletionVar \done -> do
+            void $ mkStore (wrap $ const id) {} do
+              task <- fork do
+                task' <- fork do
+                  void $ channel "..." (\_ -> pure unit) do
+                    void $ forever $ take $ const Nothing
+                    liftIO $ done false
+                cancelTask task'
+              joinTask task
+              liftIO $ done true
+          x `shouldEqual` true
+
         it "should be able to cancel forks (2)" do
           r <- runIO' $ withCompletionVar \done -> do
             void $ mkStore (wrap $ const id) {} do
@@ -274,7 +293,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
         it "should call emitter block" do
           r <- runIO' $ withCompletionVar \done -> do
             void $ mkStore (wrap $ const id) {} do
-              channel "foo"
+              void $ channel "foo"
                 (\emit -> done true)
                 (pure unit)
           r `shouldEqual` true
@@ -282,10 +301,10 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
         it "should emit to the saga block" do
           r <- runIO' $ withCompletionVar \done -> do
             void $ mkStore (wrap $ const id) {} do
-              channel "foo"
+              void $ channel "foo"
                 (\emit -> emit "foo")
                 (take case _ of
-                  "foo" -> pure do
+                  Right "foo" -> pure do
                      liftIO $ done true
                   _ -> pure do
                      liftIO $ done false
@@ -295,15 +314,16 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
         it "should emit actions from the saga block" do
           r <- runIO' $ withCompletionVar \done -> do
             void $ mkStore (wrap $ const id) {} do
-              channel "foo"
+              void $ channel "foo"
                 (\emit -> emit 1)
-                (take case _ of
-                  1 -> pure $ put "foo"
-                  _ -> Nothing
-                )
+                do
+                  take case _ of
+                    Right 1 -> Just $ put "foo"
+                    _ -> Nothing
+                  take case _ of
+                    Left "qux" -> Just $ liftIO $ done true
+                    _ -> Nothing
               take case _ of
-                "foo" -> pure do
-                  liftIO $ done true
-                _ -> pure do
-                  liftIO $ done false
+                "foo" -> Just $ put "qux"
+                _ -> Just $ liftIO $ done false
           r `shouldEqual` true

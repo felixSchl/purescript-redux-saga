@@ -36,8 +36,8 @@ import Control.Monad.IO (IO, runIO, runIO')
 import Control.Monad.IO.Class (class MonadIO, liftIO)
 import Control.Monad.IO.Effect (INFINITY)
 import Control.Monad.Reader (ask)
-import Control.Monad.Reader.Trans (runReaderT, ReaderT)
 import Control.Monad.Reader.Class (class MonadAsk, class MonadReader)
+import Control.Monad.Reader.Trans (runReaderT, ReaderT)
 import Control.Monad.Rec.Class (class MonadRec)
 import Control.Monad.Trans.Class (lift)
 import Control.Parallel (parallel, sequential)
@@ -52,6 +52,7 @@ import Data.Tuple.Nested ((/\), type (/\))
 import Global (infinity)
 import Pipes ((>->))
 import Pipes as P
+import Pipes.Aff (fromInput)
 import Pipes.Aff as P
 import Pipes.Core as P
 import React.Redux (ReduxEffect)
@@ -66,39 +67,48 @@ debugA _ = pure unit
 -- debugA = traceAnyA
 
 channel
-  :: ∀ env input action state
+  :: ∀ env input input' action state
    . String
-  -> ((input -> IO Unit) -> IO Unit)
-  -> Saga' env state input action Unit
-  -> Saga' env state action action Unit
+  -> ((input' -> IO Unit) -> IO Unit)
+  -> Saga' env state (Either input input') action Unit
+  -> Saga' env state input action SagaTask
 channel tag cb (Saga' saga) = do
-  let log :: String -> IO Unit
-      log msg = debugA $ "fork (" <> tag <> "): " <> msg
+  env /\ parentThread  <- Saga' $ lift ask
 
-  childThread <- newThread' "channel"
+  let tag' = parentThread.tag <> ">" <> tag
+      log :: String -> IO Unit
+      log msg = debugA $ "fork (" <> tag' <> "): " <> msg
 
   chan <- liftAff $ P.spawn P.new
-  env  <- ask
 
-  void $ liftAff $ forkAff $ runIO $ do
-    c <- liftAff $ forkAff $ runIO do
-      log "attaching child process (channel)"
-      liftAff do
-        runIO' $ flip (attachProc $ tag <> " - channel") childThread \input' seal' -> do
-          liftAff do
-            (runIO' do
-              flip runReaderT (env /\ childThread)
-                $ P.runEffectRec
-                $ P.for (P.fromInput' input' >-> saga) \action -> do
-                    void $ liftEff $ unsafeCoerceEff $ childThread.api.dispatch action
-            ) `cancelWith` (Canceler \_ -> void $ runIO do
-                            log "canceling: sealing task"
-                            seal'
-                            )
-      log "saga channel process finished"
-    liftIO $ runThread (P.input chan) childThread
+  fiber <- liftAff $ forkAff $ runIO do
+    log "attaching child"
+    flip (attach $ tag' <> " - thread") parentThread \input seal -> do
+      log "spawning child process (thread)"
+      childThread <- liftIO $ newThread tag' parentThread.idSupply parentThread.api
 
-  liftIO $ cb (\value -> void $ liftAff $ forkAff $ P.send value chan)
+      void $ liftAff $ forkAff $
+        runIO' $ flip (attach $ tag' <> " - task") childThread \input' seal' ->
+          void $ liftAff $
+            P.runEffectRec $
+              P.for (P.fromInput' input') \action ->
+                void $ liftAff $ forkAff $ P.send action chan
+
+      void $ liftAff $ forkAff $ runIO $
+        liftAff $
+          runIO' $
+            flip runReaderT (env /\ childThread) $
+              P.runEffectRec $
+                P.for (P.fromInput chan >-> saga) \action ->
+                  void $ liftEff $
+                    unsafeCoerceEff $
+                      childThread.api.dispatch action
+
+      runThread Left input childThread
+      seal
+
+  liftIO $ cb (\value -> void $ liftAff $ forkAff $ P.send (Right value) chan)
+  pure $ SagaTask (unsafeCoerceFiberEff fiber)
 
 take
   :: ∀ env state input output a
@@ -183,30 +193,24 @@ _fork keepAlive tag parentThread env (Saga' saga) = do
   let tag' = parentThread.tag <> ">" <> tag
       log :: String -> IO Unit
       log msg = debugA $ "fork (" <> tag' <> "): " <> msg
-  fiber <- liftAff $ forkAff do
-    runIO' $ log "attaching child thread process"
-    runIO' $ flip (attachProc $ tag' <> " - thread") parentThread \input seal -> do
+
+  childThread <- newThread tag' parentThread.idSupply parentThread.api
+  fiber <- liftAff $ forkAff $ runIO do
+    log "attaching child"
+    flip (attach $ tag' <> " - thread") parentThread \input seal -> do
       log "spawning child process (thread)"
-      childThread <- newThread tag' parentThread.idSupply parentThread.api
       void $ liftAff $ forkAff $ runIO do
         log "attaching child process (task)"
         liftAff $
-          runIO' $ flip (attachProc $ tag' <> " - task") childThread \input' seal' ->
+          runIO' $ flip (attach $ tag' <> " - task") childThread \input' seal' ->
             liftAff $
               runIO' $
                 flip runReaderT (env /\ childThread) $ do
                   P.runEffectRec $
                     P.for (P.fromInput' input' >-> saga) \action -> do
                       void $ liftEff $ unsafeCoerceEff $ childThread.api.dispatch action
-        log "saga process finished"
-      log "run thread"
-
-      runThread input childThread
-      log "run thread finished"
-
-      unless keepAlive do
-        log "sealing..."
-        seal
+      runThread id input childThread
+      unless keepAlive seal
 
   pure $ SagaTask (unsafeCoerceFiberEff fiber)
 
@@ -290,22 +294,13 @@ newThread tag idSupply api = do
   procsRef <- liftEff $ newRef []
   pure { tag, idSupply, procsRef, failureVar, api }
 
-newThread'
-  :: ∀ env state input' input output
-   . String
-  -> Saga' env state input output (SagaThread state input' output)
-newThread' tag = do
-  _ /\ { idSupply, api } <- Saga' (lift ask)
-  failureVar <- liftAff $ makeEmptyVar
-  procsRef <- liftEff $ newRef []
-  pure { tag, idSupply, procsRef, failureVar, api }
-
 runThread
-  :: ∀ env state input output
-   . P.Input input
-  -> SagaThread state input output
+  :: ∀ env state input input' output
+   . (input -> input')
+  -> P.Input input
+  -> SagaThread state input' output
   -> IO Unit
-runThread input thread = do
+runThread f input thread = do
   let log :: String -> IO Unit
       log msg = debugA $ "runThread (" <> thread.tag <> "): " <> msg
 
@@ -319,7 +314,7 @@ runThread input thread = do
               procs <- liftEff $ readRef thread.procsRef
               lift $ for_ procs \{ output, id } -> do
                 runIO' $ log $ "sending value downstream to: pid "  <> show id
-                void $ forkAff $ P.send' value output
+                void $ forkAff $ P.send' (f value) output
             runIO' $ log "input pipe exhausted"
           procs <- liftEff $ readRef thread.procsRef
           log $ "waiting for " <> show (Array.length procs) <> " processes to finish running..."
@@ -334,17 +329,17 @@ runThread input thread = do
     _ -> void do
       log $ "finished"
 
-attachProc
+attach
   :: ∀ state input output
    . String
   -> (P.Input input -> IO Unit -> IO Unit)
   -> SagaThread state input output
   -> IO Unit
-attachProc tag f thread = do
+attach tag f thread = do
   id <- nextId $ thread.idSupply
 
   let log :: String -> IO Unit
-      log msg = debugA $ "attachProc (" <> tag <>  ", pid=" <> show id <> "): " <> msg
+      log msg = debugA $ "attach (" <> tag <>  ", pid=" <> show id <> "): " <> msg
 
   chan <- liftAff $ P.spawn P.new
   successVar <- liftAff $ makeEmptyVar
@@ -354,7 +349,7 @@ attachProc tag f thread = do
 
   liftAff $
     (do
-      result <- attempt (runIO $ f (P.input chan) ({-liftAff $ P.seal chan-} pure unit))
+      result <- attempt $ runIO $ f (P.input chan) (liftAff $ P.seal chan)
       runIO' $ case result of
         Right _ -> do
           liftAff $ putVar unit successVar
@@ -403,7 +398,7 @@ sagaMiddleware saga = wrap $ \api ->
                   (\e ->
                     let msg = maybe "" (", stack trace follows:\n" <> _) $ stack e
                      in throwError $ error $ "Saga terminated due to error" <> msg)
-                  $ runThread (P.input chan) thread
+                  $ runThread id (P.input chan) thread
             pure \action -> void do
               readRef refOutput >>= case _ of
                 Just output -> void $ launchAff $ P.send' action output
