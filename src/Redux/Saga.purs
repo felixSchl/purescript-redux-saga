@@ -10,13 +10,12 @@ module Redux.Saga (
   , take
   , fork
   , forkNamed
-  , fork'
-  , forkNamed'
   , put
   , select
   , joinTask
   , cancelTask
   , channel
+  , localEnv
   ) where
 
 import Debug.Trace
@@ -152,6 +151,15 @@ select = do
   _ /\ { api } <- Saga' (lift ask)
   liftEff api.getState
 
+localEnv
+  :: ∀ env env2 state input output a
+   . (env -> env2)
+  -> Saga' env2 state input output a
+  -> Saga' env state input output a
+localEnv f saga = do
+  env <- ask
+  joinTask =<< fork' (f env) saga
+
 fork
   :: ∀ env state input output a
    . Saga' env state input output a
@@ -246,6 +254,11 @@ derive newtype instance monadErrorSaga :: MonadError Error (Saga' env state inpu
 
 instance monadAskSaga :: MonadAsk env (Saga' env state input action) where
   ask = fst <$> Saga' (lift ask)
+
+instance monadReaderSaga :: MonadReader env (Saga' env state input action) where
+  local f saga = do
+    env <- ask
+    joinTask =<< fork' (f env) saga
 
 instance monadIOSaga :: MonadIO (Saga' env state input action) where
   liftIO action = Saga' $ liftIO action

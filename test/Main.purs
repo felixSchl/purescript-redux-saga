@@ -14,7 +14,7 @@ import Control.Monad.Error.Class (throwError)
 import Control.Monad.IO (IO, runIO')
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Rec.Class (forever)
-import Control.Monad.Reader.Class (ask)
+import Control.Monad.Reader.Class (ask, local)
 import Control.Safely (replicateM_)
 import Data.Array as A
 import Data.Foldable (for_)
@@ -141,7 +141,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
         it "should work" do
           r <- runIO' $ withCompletionVar \done -> do
             void $ mkStore (wrap $ const id) {} do
-              void $ fork' 10 do
+              void $ fork $ localEnv (const 10) do
                 testEnv >>= liftIO <<< done
           r `shouldEqual` 10
 
