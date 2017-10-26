@@ -25,7 +25,7 @@ import Prelude
 import Control.Alt ((<|>))
 import Control.Monad.Aff (Canceler(..), Fiber, killFiber, joinFiber, attempt, cancelWith, delay, forkAff, launchAff)
 import Control.Monad.Aff as Aff
-import Control.Monad.Aff.AVar (AVar, AVAR, makeEmptyVar, readVar, putVar, takeVar, tryReadVar)
+import Control.Monad.Aff.AVar (AVar, AVAR, makeEmptyVar, readVar, putVar, tryTakeVar, takeVar, tryReadVar)
 import Control.Monad.Aff.Class (class MonadAff, liftAff)
 import Control.Monad.Eff.Class (class MonadEff, liftEff)
 import Control.Monad.Eff.Exception (Error, error, stack)
@@ -67,11 +67,11 @@ debugA _ = pure unit
 -- debugA = traceAnyA
 
 channel
-  :: ∀ env input input' action state
+  :: ∀ env input input' action state a
    . String
   -> ((input' -> IO Unit) -> IO Unit)
-  -> Saga' env state (Either input input') action Unit
-  -> Saga' env state input action SagaTask
+  -> Saga' env state (Either input input') action a
+  -> Saga' env state input action (SagaTask (Maybe a))
 channel tag cb (Saga' saga) = do
   env /\ parentThread  <- Saga' $ lift ask
 
@@ -82,11 +82,11 @@ channel tag cb (Saga' saga) = do
   chan <- liftAff $ P.spawn P.new
 
   fiber <- liftAff $ forkAff $ runIO do
+    completionV :: AVar a <- liftAff $ makeEmptyVar
     log "attaching child"
     flip (attach $ tag' <> " - thread") parentThread \input seal -> do
       log "spawning child process (thread)"
       childThread <- liftIO $ newThread tag' parentThread.idSupply parentThread.api
-
       void $ liftAff $ forkAff $
         runIO' $ flip (attach $ tag' <> " - task") childThread \input' seal' ->
           void $ liftAff $
@@ -99,15 +99,19 @@ channel tag cb (Saga' saga) = do
           runIO' $
             flip runReaderT (env /\ childThread) $
               P.runEffectRec $
-                P.for (P.fromInput chan >-> saga) \action ->
+                P.for (P.fromInput chan >-> do
+                  saga >>= liftAff <<< flip putVar completionV
+                ) \action ->
                   void $ liftEff $
                     unsafeCoerceEff $
                       childThread.api.dispatch action
 
       runThread Left input childThread
       seal
+    liftAff $ tryTakeVar completionV
 
   liftIO $ cb (\value -> void $ liftAff $ forkAff $ P.send (Right value) chan)
+
   pure $ SagaTask (unsafeCoerceFiberEff fiber)
 
 take
@@ -129,66 +133,65 @@ put action = Saga' do
   P.yield action
 
 joinTask
-  :: ∀ env state input output
-   . SagaTask
-  -> Saga' env state input output Unit
-joinTask (SagaTask fiber) = liftIO $ liftAff do
-  joinFiber fiber
+  :: ∀ env state input output a
+   . SagaTask a
+  -> Saga' env state input output a
+joinTask (SagaTask fiber) = liftAff $ joinFiber fiber
 
 cancelTask
-  :: ∀ env state input output
-   . SagaTask
+  :: ∀ env state input output a
+   . SagaTask a
   -> Saga' env state input output Unit
 cancelTask (SagaTask fiber) = void $ liftAff do
   killFiber (error "CANCEL_TASK") fiber
 
 select
-  :: ∀ env state input output
+  :: ∀ env state input output a
    . Saga' env state input output state
 select = do
   _ /\ { api } <- Saga' (lift ask)
   liftEff api.getState
 
 fork
-  :: ∀ env state input output
-   . Saga' env state input output Unit
-  -> Saga' env state input output SagaTask
+  :: ∀ env state input output a
+   . Saga' env state input output a
+  -> Saga' env state input output (SagaTask a)
 fork = forkNamed "anonymous"
 
 fork'
-  :: ∀ env newEnv state input output
+  :: ∀ env newEnv state input output a
    . newEnv
-  -> Saga' newEnv state input output Unit
-  -> Saga' env state input output SagaTask
+  -> Saga' newEnv state input output a
+  -> Saga' env state input output (SagaTask a)
 fork' = forkNamed' "anonymous"
 
 forkNamed
-  :: ∀ env state input output
+  :: ∀ env state input output a
    . String
-  -> Saga' env state input output Unit
-  -> Saga' env state input output SagaTask
+  -> Saga' env state input output a
+  -> Saga' env state input output (SagaTask a)
 forkNamed tag saga = do
   env <- ask
   forkNamed' tag env saga
 
 forkNamed'
-  :: ∀ env newEnv state input output
+  :: ∀ env newEnv state input output a
    . String
   -> newEnv
-  -> Saga' newEnv state input output Unit
-  -> Saga' env state input output SagaTask
+  -> Saga' newEnv state input output a
+  -> Saga' env state input output (SagaTask a)
 forkNamed' tag env saga = do
   _ /\ thread <- Saga' (lift ask)
   liftIO $ _fork false tag thread env saga
 
 _fork
-  :: ∀ env state input output
+  :: ∀ env state input output a
    . Boolean
   -> String
   -> SagaThread state input output
   -> env
-  -> Saga' env state input output Unit
-  -> IO SagaTask
+  -> Saga' env state input output a
+  -> IO (SagaTask a)
 _fork keepAlive tag parentThread env (Saga' saga) = do
   let tag' = parentThread.tag <> ">" <> tag
       log :: String -> IO Unit
@@ -196,6 +199,7 @@ _fork keepAlive tag parentThread env (Saga' saga) = do
 
   childThread <- newThread tag' parentThread.idSupply parentThread.api
   fiber <- liftAff $ forkAff $ runIO do
+    completionV :: AVar a <- liftAff $ makeEmptyVar
     log "attaching child"
     flip (attach $ tag' <> " - thread") parentThread \input seal -> do
       log "spawning child process (thread)"
@@ -207,16 +211,19 @@ _fork keepAlive tag parentThread env (Saga' saga) = do
               runIO' $
                 flip runReaderT (env /\ childThread) $ do
                   P.runEffectRec $
-                    P.for (P.fromInput' input' >-> saga) \action -> do
+                    P.for (P.fromInput' input' >-> do
+                      saga >>= liftAff <<< flip putVar completionV
+                    ) \action -> do
                       void $ liftEff $ unsafeCoerceEff $ childThread.api.dispatch action
       runThread id input childThread
       unless keepAlive seal
+    liftAff $ takeVar completionV
 
   pure $ SagaTask (unsafeCoerceFiberEff fiber)
 
 type Saga env state action a = Saga' env state action action a
 
-newtype SagaTask = SagaTask (Fiber (avar :: AVAR) Unit)
+newtype SagaTask a = SagaTask (Fiber (avar :: AVAR) a)
 
 newtype Saga' env state input output a
   = Saga' (
@@ -330,9 +337,9 @@ runThread f input thread = do
       log $ "finished"
 
 attach
-  :: ∀ state input output
+  :: ∀ state input output a
    . String
-  -> (P.Input input -> IO Unit -> IO Unit)
+  -> (P.Input input -> IO Unit -> IO a)
   -> SagaThread state input output
   -> IO Unit
 attach tag f thread = do
