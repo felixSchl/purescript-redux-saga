@@ -13,12 +13,12 @@ import Control.Monad.Eff.Ref (modifyRef, newRef, readRef)
 import Control.Monad.Error.Class (throwError)
 import Control.Monad.IO (IO, runIO')
 import Control.Monad.IO.Class (liftIO)
-import Control.Monad.Rec.Class (forever)
 import Control.Monad.Reader.Class (ask, local)
+import Control.Monad.Rec.Class (forever)
 import Control.Safely (replicateM_)
 import Data.Array as A
-import Data.Foldable (for_)
 import Data.Either (Either(..))
+import Data.Foldable (for_)
 import Data.Maybe (Maybe(..))
 import Data.Newtype (wrap)
 import Data.Time.Duration (Milliseconds(..))
@@ -124,7 +124,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
 
     describe "put" do
       it "should not overflow the stack" do
-        let target = 5000
+        let target = 500
         v <- runIO' $ withCompletionVar \done -> do
           void $ mkStore (wrap $ const id) {} do
             ref <- liftEff $ newRef 1
@@ -134,7 +134,6 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
             replicateM_ target $ put unit
             liftEff (readRef ref) >>= liftIO <<< done
         v `shouldEqual` target
-
 
     describe "forks" do
       describe "local envs" do
@@ -288,6 +287,33 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
 
               liftEff (readRef ref) >>= liftIO <<< done
           r `shouldEqual` [1, 2, 3]
+
+        it "debounce" do
+          x <- runIO' $ withCompletionVar \done -> do
+            void $ mkStore (wrap $ const id) {} do
+              ref <- liftEff $ newRef 0
+              task <- forkNamed "debounced" $
+                let loop i mAct = do
+                      loop (i + 1) <<< Just =<< take case _ of
+                        _ -> Just do
+                          forkNamed "debounce" do
+                            for_ mAct cancelTask
+                            liftAff $ delay $ 100.0 # Milliseconds
+                            liftEff $ modifyRef ref (_ + 1)
+                 in loop 1 Nothing
+
+              put unit
+              liftAff $ delay $ 10.0 # Milliseconds
+
+              put unit
+              liftAff $ delay $ 10.0 # Milliseconds
+
+              put unit
+              liftAff $ delay $ 10.0 # Milliseconds
+
+              liftAff $ delay $ 200.0 # Milliseconds
+              liftEff (readRef ref) >>= liftIO <<< done
+          x `shouldEqual` 1
 
       describe "channels" do
         it "should call emitter block" do
