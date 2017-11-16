@@ -2,6 +2,7 @@ module Test.Main where
 
 import Prelude
 import Redux.Saga
+import Redux.Saga.Combinators (debounce)
 
 import Control.Monad.Aff (delay, forkAff)
 import Control.Monad.Aff.AVar (makeEmptyVar, takeVar, putVar)
@@ -292,15 +293,11 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
           x <- runIO' $ withCompletionVar \done -> do
             void $ mkStore (wrap $ const id) {} do
               ref <- liftEff $ newRef 0
-              task <- forkNamed "debounced" $
-                let loop i mAct = do
-                      loop (i + 1) <<< Just =<< take case _ of
-                        _ -> Just do
-                          forkNamed "debounce" do
-                            for_ mAct cancelTask
-                            liftAff $ delay $ 100.0 # Milliseconds
-                            liftEff $ modifyRef ref (_ + 1)
-                 in loop 1 Nothing
+
+              void $ fork $
+                debounce (100.0 # Milliseconds) $
+                  const $ Just do
+                    liftEff $ modifyRef ref (_ + 1)
 
               put unit
               liftAff $ delay $ 10.0 # Milliseconds
