@@ -60,6 +60,21 @@ main :: Eff _ Unit
 main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
   describe "sagas" do
     describe "take" do
+      it "should be able to miss events" do
+        r <- runIO' $ withCompletionVar \done -> do
+          void $ mkStore (wrap $ const id) {} do
+            void $ fork do
+              x <- take (pure <<< pure <<< id)
+              void $ fork do
+                liftAff $ delay $ 20.0 # Milliseconds
+                liftIO $ done x
+              liftAff $ delay $ 10.0 # Milliseconds
+              y <- take (pure <<< pure <<< id)
+              liftIO $ done y
+            put 1
+            put 2
+        r `shouldEqual` 1
+
       it "should run matching action handler" do
         r <- runIO' $ withCompletionVar \done -> do
           void $ mkStore (wrap $ const id) {} do

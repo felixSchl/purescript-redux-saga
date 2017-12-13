@@ -10,6 +10,8 @@ module Redux.Saga (
   , take
   , fork
   , forkNamed
+  , fork'
+  , forkNamed'
   , put
   , select
   , joinTask
@@ -375,7 +377,7 @@ attach tag f thread = do
   let log :: String -> IO Unit
       log msg = debugA $ "attach (" <> tag <>  ", pid=" <> show id <> "): " <> msg
 
-  chan <- liftAff $ P.spawn P.new
+  chan <- liftAff $ P.spawn P.realTime
   successVar <- liftAff $ makeEmptyVar
 
   log $ "attaching"
@@ -426,7 +428,7 @@ sagaMiddleware saga = wrap $ \api ->
             refOutput <- newRef Nothing
             refCallbacks  <- newRef []
             _ <- launchAff do
-              chan <- P.spawn P.new
+              chan <- P.spawn P.realTime
               callbacks <- liftEff $ modifyRef' refCallbacks \value -> { state: [], value }
               for_ callbacks (_ $ P.output chan)
               liftEff $ modifyRef refOutput (const $ Just $ P.output chan)
