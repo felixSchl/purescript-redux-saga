@@ -31,7 +31,7 @@ import Control.Monad.Aff.Class (class MonadAff, liftAff)
 import Control.Monad.Eff.Class (class MonadEff, liftEff)
 import Control.Monad.Eff.Exception (Error, error, stack)
 import Control.Monad.Eff.Exception as Error
-import Control.Monad.Eff.Ref (Ref, newRef, readRef, modifyRef, modifyRef')
+import Control.Monad.Eff.Ref (Ref, modifyRef, modifyRef', newRef, readRef)
 import Control.Monad.Eff.Unsafe (unsafeCoerceEff, unsafePerformEff)
 import Control.Monad.Error.Class (class MonadError, class MonadThrow, throwError, catchError)
 import Control.Monad.IO (IO, runIO, runIO')
@@ -43,6 +43,7 @@ import Control.Monad.Reader.Trans (runReaderT, ReaderT)
 import Control.Monad.Rec.Class (class MonadRec)
 import Control.Monad.Trans.Class (lift)
 import Control.Parallel (parallel, sequential)
+import Data.Array (any)
 import Data.Array as Array
 import Data.Either (Either(Right, Left))
 import Data.Foldable (for_)
@@ -66,6 +67,7 @@ unsafeCoerceFiberEff = unsafeCoerce
 
 debugA :: ∀ a b. Show b => Applicative a => b -> a Unit
 debugA _ = pure unit
+-- debugA = traceAnyA
 
 channel
   :: ∀ env input input' action state a
@@ -213,6 +215,7 @@ _fork keepAlive tag parentThread env (Saga' saga) = do
       log :: String -> IO Unit
       log msg = debugA $ "fork (" <> tag' <> "): " <> msg
 
+  log $ "starting keepAlive=" <> show keepAlive
   childThread <- mkThread tag' parentThread.idSupply parentThread.api
   fiber <- liftAff $ forkAff $ supervise $ runIO do
     completionV <- liftAff $ makeEmptyVar
@@ -232,7 +235,11 @@ _fork keepAlive tag parentThread env (Saga' saga) = do
                     ) \action -> do
                       void $ liftEff $ unsafeCoerceEff $ childThread.api.dispatch action
       runThread id input childThread
-      unless keepAlive seal
+
+      unless keepAlive do
+        log "sealing input"
+        seal
+
       void $ liftAff $ joinFiber f1
     liftAff $ takeVar completionV
 
@@ -339,6 +346,7 @@ runThread f input thread = do
       Nothing <$ parallel do
         runIO' do
           log "running input pipe"
+
           void $ liftAff $ forkAff do
             P.runEffectRec $ P.for (P.fromInput' input) \value -> do
               procs <- liftEff $ readRef thread.procsRef
@@ -346,9 +354,21 @@ runThread f input thread = do
                 runIO' $ log $ "sending value downstream to: pid "  <> show id
                 void $ forkAff $ P.send' (f value) output
             runIO' $ log "input pipe exhausted"
-          procs <- liftEff $ readRef thread.procsRef
-          log $ "waiting for " <> show (Array.length procs) <> " processes to finish running..."
-          liftAff $ for_ procs (readVar <<< _.successVar)
+
+
+          -- wait for any attached processes to start running by repeatedly checking
+          -- the mutable `procsRef` cell and awaiting their computations to
+          -- conclude.
+          let awaitProcs = do
+                procs <- liftEff $ readRef thread.procsRef
+                log $ "waiting for " <> show (Array.length procs) <> " processes to finish running..."
+                unless (Array.null procs) do
+                  liftAff $ for_ procs (readVar <<< _.successVar)
+                  liftEff $ modifyRef thread.procsRef $ Array.filter \{ id } ->
+                    not $ any ((id == _) <<< _.id) procs
+                  awaitProcs
+          awaitProcs
+
           log $ "finished"
 
   case result of
@@ -377,7 +397,7 @@ attach tag f thread = do
   let log :: String -> IO Unit
       log msg = debugA $ "attach (" <> tag <>  ", pid=" <> show id <> "): " <> msg
 
-  chan <- liftAff $ P.spawn P.realTime
+  chan       <- liftAff $ P.spawn P.realTime
   successVar <- liftAff $ makeEmptyVar
 
   log $ "attaching"
@@ -395,8 +415,10 @@ attach tag f thread = do
                     <> maybe "" (", stack trace follows:\n" <> _) (stack e)
         liftAff $ putVar e' thread.failureVar
 
+  log $ "adding to procs ref"
   liftEff $ modifyRef thread.procsRef (_ `Array.snoc`
-                                          { id, output: P.output chan
+                                          { id
+                                          , output: P.output chan
                                           , successVar
                                           , fiber
                                           })
