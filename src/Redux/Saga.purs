@@ -1,5 +1,5 @@
-module Redux.Saga (
-    sagaMiddleware
+module Redux.Saga
+  ( sagaMiddleware
   , Saga
   , Saga'
   , SagaPipe
@@ -18,15 +18,15 @@ module Redux.Saga (
   , cancelTask
   , channel
   , localEnv
+  , raceTasks
   ) where
 
 import Debug.Trace
 import Prelude
 
-import Control.Alt ((<|>))
-import Control.Monad.Aff (Canceler(..), Fiber, attempt, cancelWith, delay, forkAff, joinFiber, killFiber, launchAff, supervise)
-import Control.Monad.Aff as Aff
-import Control.Monad.Aff.AVar (AVar, AVAR, makeEmptyVar, readVar, putVar, tryTakeVar, takeVar, tryReadVar)
+import Control.Alt (class Alt, (<|>))
+import Control.Monad.Aff (Canceler(Canceler), Fiber, attempt, cancelWith, delay, forkAff, joinFiber, killFiber, launchAff, supervise)
+import Control.Monad.Aff.AVar (AVAR, AVar, makeEmptyVar, putVar, readVar, takeVar, tryTakeVar)
 import Control.Monad.Aff.Class (class MonadAff, liftAff)
 import Control.Monad.Eff.Class (class MonadEff, liftEff)
 import Control.Monad.Eff.Exception (Error, error, stack)
@@ -52,13 +52,10 @@ import Data.Newtype (class Newtype, wrap)
 import Data.Time.Duration (Milliseconds(..))
 import Data.Tuple (fst)
 import Data.Tuple.Nested ((/\), type (/\))
-import Global (infinity)
 import Pipes ((>->))
 import Pipes as P
-import Pipes.Aff (fromInput)
 import Pipes.Aff as P
-import Pipes.Core as P
-import React.Redux (ReduxEffect)
+import Pipes.Core (Pipe, runEffectRec) as P
 import React.Redux as Redux
 import Unsafe.Coerce (unsafeCoerce)
 
@@ -70,11 +67,11 @@ debugA _ = pure unit
 -- debugA = traceAnyA
 
 channel
-  :: ∀ env input input' action state a
+  :: ∀ env input input' action state a eff
    . String
   -> ((input' -> IO Unit) -> IO Unit)
   -> Saga' env state (Either input input') action a
-  -> Saga' env state input action (SagaTask (Maybe a))
+  -> Saga' env state input action (SagaTask (Maybe a) eff)
 channel tag cb (Saga' saga) = do
   env /\ parentThread  <- Saga' $ lift ask
 
@@ -142,14 +139,14 @@ put action = Saga' do
   P.yield action
 
 joinTask
-  :: ∀ env state input output a
-   . SagaTask a
+  :: ∀ env state input output a eff
+   . SagaTask a eff
   -> Saga' env state input output a
 joinTask (SagaTask fiber) = liftAff $ joinFiber fiber
 
 cancelTask
-  :: ∀ env state input output a
-   . SagaTask a
+  :: ∀ env state input output a eff
+   . SagaTask a eff
   -> Saga' env state input output Unit
 cancelTask (SagaTask fiber) = void $ liftAff do
   killFiber (error "REDUX_SAGA_CANCEL_TASK") fiber
@@ -171,45 +168,45 @@ localEnv f saga = do
   joinTask =<< fork' (f env) saga
 
 fork
-  :: ∀ env state input output a
+  :: ∀ env state input output a eff
    . Saga' env state input output a
-  -> Saga' env state input output (SagaTask a)
+  -> Saga' env state input output (SagaTask a eff)
 fork = forkNamed "anonymous"
 
 fork'
-  :: ∀ env newEnv state input output a
+  :: ∀ env newEnv state input output a eff
    . newEnv
   -> Saga' newEnv state input output a
-  -> Saga' env state input output (SagaTask a)
+  -> Saga' env state input output (SagaTask a eff)
 fork' = forkNamed' "anonymous"
 
 forkNamed
-  :: ∀ env state input output a
+  :: ∀ env state input output a eff
    . String
   -> Saga' env state input output a
-  -> Saga' env state input output (SagaTask a)
+  -> Saga' env state input output (SagaTask a eff)
 forkNamed tag saga = do
   env <- ask
   forkNamed' tag env saga
 
 forkNamed'
-  :: ∀ env newEnv state input output a
+  :: ∀ env newEnv state input output a eff
    . String
   -> newEnv
   -> Saga' newEnv state input output a
-  -> Saga' env state input output (SagaTask a)
+  -> Saga' env state input output (SagaTask a eff)
 forkNamed' tag env saga = do
   _ /\ thread <- Saga' (lift ask)
   liftIO $ _fork false tag thread env saga
 
 _fork
-  :: ∀ env state input output a
+  :: ∀ env state input output a eff
    . Boolean
   -> String
   -> SagaThread state input output
   -> env
   -> Saga' env state input output a
-  -> IO (SagaTask a)
+  -> IO (SagaTask a eff)
 _fork keepAlive tag parentThread env (Saga' saga) = do
   let tag' = parentThread.tag <> ">" <> tag
       log :: String -> IO Unit
@@ -247,7 +244,21 @@ _fork keepAlive tag parentThread env (Saga' saga) = do
 
 type Saga env state action a = Saga' env state action action a
 
-newtype SagaTask a = SagaTask (Fiber (avar :: AVAR) a)
+newtype SagaTask a eff = SagaTask (Fiber (avar :: AVAR | eff) a)
+
+raceTasks
+  :: ∀ a eff env state input output
+   . SagaTask a eff
+  -> SagaTask a eff
+  -> Saga' env state input output a
+raceTasks (SagaTask t1) (SagaTask t2) =
+  liftAff do
+    result <- sequential $
+      parallel (Left  <$> joinFiber t1) <|>
+      parallel (Right <$> joinFiber t2)
+    case result of
+      Right v -> v <$ killFiber (error "REDUX_SAGA_CANCEL_TASK") t1
+      Left  v -> v <$ killFiber (error "REDUX_SAGA_CANCEL_TASK") t2
 
 newtype Saga' env state input output a
   = Saga' (
@@ -267,6 +278,12 @@ derive newtype instance monadSaga :: Monad (Saga' env state input action)
 derive newtype instance monadRecSaga :: MonadRec (Saga' env state input action)
 derive newtype instance monadThrowSaga :: MonadThrow Error (Saga' env state input action)
 derive newtype instance monadErrorSaga :: MonadError Error (Saga' env state input action)
+
+instance altSaga :: Alt (Saga' env state input action) where
+  alt s1 s2 = do
+    t1 <- fork s1
+    t2 <- fork s2
+    raceTasks t1 t2
 
 instance monadAskSaga :: MonadAsk env (Saga' env state input action) where
   ask = fst <$> Saga' (lift ask)
@@ -374,7 +391,7 @@ runThread f input thread = do
   case result of
     Just err -> do
       if Error.message err == "REDUX_SAGA_CANCEL_TASK"
-        then log $ "canceled"
+        then log $ "cancelled"
         else do
           log $ "finished with error"
           throwError err
