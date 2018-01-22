@@ -149,7 +149,8 @@ cancelTask
    . SagaTask a eff
   -> Saga' env state input output Unit
 cancelTask (SagaTask fiber) = void $ liftAff do
-  killFiber (error "REDUX_SAGA_CANCEL_TASK") fiber
+  forkAff $
+    killFiber (error "REDUX_SAGA_CANCEL_TASK") fiber
 
 select
   :: ∀ env state input output a
@@ -257,8 +258,8 @@ raceTasks (SagaTask t1) (SagaTask t2) =
       parallel (Left  <$> joinFiber t1) <|>
       parallel (Right <$> joinFiber t2)
     case result of
-      Right v -> v <$ killFiber (error "REDUX_SAGA_CANCEL_TASK") t1
-      Left  v -> v <$ killFiber (error "REDUX_SAGA_CANCEL_TASK") t2
+      Right v -> v <$ (forkAff (killFiber (error "REDUX_SAGA_CANCEL_TASK") t1))
+      Left  v -> v <$ (forkAff (killFiber (error "REDUX_SAGA_CANCEL_TASK") t2))
 
 newtype Saga' env state input output a
   = Saga' (
@@ -398,7 +399,7 @@ runThread f input thread = do
 
       log "canceling processes"
       procs <- liftEff $ readRef thread.procsRef
-      liftAff $ for_ procs (killFiber err <<< _.fiber)
+      liftAff $ for_ procs (forkAff <<< killFiber err <<< _.fiber)
     _ -> void do
       log $ "finished"
 
