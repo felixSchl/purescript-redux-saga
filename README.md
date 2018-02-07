@@ -57,12 +57,12 @@ The `Saga` monad is an opinionated, closed monad with a range of functionality.
 
 
 ```haskell
---  read-only environment, accessible via `MonadAsk` instance
---  /   your state container type (reducer)
---  |    /    the type this saga consumes (i.e. actions)
---  |    |     /    the type of output this saga produces (i.e. actions)
---  |    |     |     /    the return value of this Saga
---  |    |     |     |     /
+--             read-only environment, accessible via `MonadAsk` instance
+--             /   your state container type (reducer)
+--             |    /    the type this saga consumes (i.e. actions)
+--             |    |     /    the type of output this saga produces (i.e. actions)
+--             |    |     |     /    the return value of this Saga
+--             |    |     |     |     /
 newtype Saga' env state input output a = ...
 ```
 
