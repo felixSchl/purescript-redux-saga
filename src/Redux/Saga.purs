@@ -8,6 +8,7 @@ module Redux.Saga
   , SagaTask
   , IdSupply
   , take
+  , takeLatest
   , fork
   , forkNamed
   , fork'
@@ -21,12 +22,11 @@ module Redux.Saga
   , raceTasks
   ) where
 
-import Debug.Trace
 import Prelude
 
 import Control.Alt (class Alt, (<|>))
-import Control.Monad.Aff (Canceler(Canceler), Fiber, attempt, cancelWith, delay, forkAff, joinFiber, killFiber, launchAff, supervise)
-import Control.Monad.Aff.AVar (AVAR, AVar, makeEmptyVar, putVar, readVar, takeVar, tryTakeVar)
+import Control.Monad.Aff (Canceler(Canceler), Fiber, apathize, attempt, bracket, cancelWith, delay, forkAff, joinFiber, killFiber, launchAff, supervise)
+import Control.Monad.Aff.AVar (AVAR, AVar, killVar, makeEmptyVar, putVar, readVar, takeVar, tryTakeVar)
 import Control.Monad.Aff.Class (class MonadAff, liftAff)
 import Control.Monad.Eff.Class (class MonadEff, liftEff)
 import Control.Monad.Eff.Exception (Error, error, stack)
@@ -50,11 +50,12 @@ import Data.Foldable (for_)
 import Data.Maybe (Maybe(..), maybe)
 import Data.Newtype (class Newtype, wrap)
 import Data.Time.Duration (Milliseconds(..))
+import Data.Traversable (traverse_)
 import Data.Tuple (fst)
 import Data.Tuple.Nested ((/\), type (/\))
 import Pipes ((>->))
-import Pipes as P
-import Pipes.Aff as P
+import Pipes (await, for, yield) as P
+import Pipes.Aff (Input, Output, fromInput, fromInput', input, new, output, realTime, seal, send, send', spawn) as P
 import Pipes.Core (Pipe, runEffectRec) as P
 import React.Redux as Redux
 import Unsafe.Coerce (unsafeCoerce)
@@ -124,11 +125,24 @@ take
   :: ∀ env state input output a
    . (input -> Maybe (Saga' env state input output a))
   -> Saga' env state input output a
-take f = Saga' go
+take f = go
   where
-  go = map f P.await >>= case _ of
-    Just (Saga' saga) -> saga
-    Nothing           -> go
+  go = map f (Saga' P.await) >>= case _ of
+    Just saga -> saga
+    Nothing   -> go
+
+takeLatest
+  :: ∀ env state input output a
+   . (input -> Maybe (Saga' env state input output a))
+  -> Saga' env state input output a
+takeLatest f = go Nothing
+  where
+  go mTask = map f (Saga' P.await) >>= case _ of
+    Just saga -> do
+      traverse_ cancelTask mTask
+      go <<< Just =<< fork saga
+    Nothing ->
+      go mTask
 
 put
   :: ∀ env input action state
