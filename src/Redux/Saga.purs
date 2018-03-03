@@ -216,30 +216,37 @@ _fork keepAlive tag parentThread env (Saga' saga) = do
   log $ "starting keepAlive=" <> show keepAlive
   childThread <- mkThread tag' parentThread.idSupply parentThread.api
   fiber <- liftAff $ forkAff $ supervise $ runIO do
-    completionV <- liftAff $ makeEmptyVar
-    log "attaching child"
-    flip (attach $ tag' <> " - thread") parentThread \input seal -> do
-      log "spawning child process (thread)"
-      f1 <- liftAff $ forkAff $ runIO do
-        log "attaching child process (task)"
-        liftAff $
-          runIO' $ flip (attach $ tag' <> " - task") childThread \input' seal' ->
-            liftAff $
-              runIO' $
-                flip runReaderT (env /\ childThread) $ do
-                  P.runEffectRec $
-                    P.for (P.fromInput' input' >-> do
-                      saga >>= liftAff <<< flip putVar completionV
-                    ) \action -> do
-                      void $ liftEff $ unsafeCoerceEff $ childThread.api.dispatch action
-      runThread id input childThread
+    liftAff $
+      bracket
+        makeEmptyVar
+        (apathize <<< killVar (error "DONE"))
+        \completionV -> runIO' do
+          log "attaching child"
+          flip (attach $ tag' <> " - thread") parentThread \input seal -> do
+            log "spawning child process (thread)"
+            f1 <- liftAff $ forkAff $ runIO do
+              log "attaching child process (task)"
+              liftAff $
+                runIO' $ flip (attach $ tag' <> " - task") childThread \input' seal' ->
+                  liftAff $
+                    runIO' $
+                      flip runReaderT (env /\ childThread) $ do
+                        P.runEffectRec $
+                          P.for (P.fromInput' input' >-> do
+                            saga >>= \val ->
+                              liftAff $
+                                apathize $
+                                  putVar val completionV
+                          ) \action -> do
+                            void $ liftEff $ unsafeCoerceEff $ childThread.api.dispatch action
+            runThread id input childThread
 
-      unless keepAlive do
-        log "sealing input"
-        seal
+            unless keepAlive do
+              log "sealing input"
+              seal
 
-      void $ liftAff $ joinFiber f1
-    liftAff $ takeVar completionV
+            void $ liftAff $ joinFiber f1
+          liftAff $ takeVar completionV
 
   pure $ SagaTask (unsafeCoerceFiberEff fiber)
 
