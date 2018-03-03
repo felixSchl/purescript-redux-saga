@@ -490,10 +490,16 @@ sagaMiddleware saga = wrap $ \api ->
                   $ runThread id (P.input chan) thread
             pure \action -> void do
               readRef refOutput >>= case _ of
-                Just output -> void $ launchAff $ P.send' action output
-                Nothing -> void $ modifyRef refCallbacks
-                                            (_ `Array.snoc` \output ->
-                                              void $ P.send' action output)
+                Just output ->
+                  void $
+                    launchAff $ do
+                      delay $ 0.0 # Milliseconds
+                      P.send' action output
+                Nothing -> do
+                  void $
+                    modifyRef refCallbacks
+                      (_ `Array.snoc` \output ->
+                        void $ P.send' action output)
    in \next action -> void do
         unsafeCoerceEff $ emitAction action
         next action
