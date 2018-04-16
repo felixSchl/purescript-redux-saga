@@ -19,7 +19,6 @@ module Redux.Saga
   , cancelTask
   , channel
   , localEnv
-  , raceTasks
   ) where
 
 import Prelude
@@ -156,7 +155,12 @@ joinTask
   :: ∀ env state input output a eff
    . SagaTask a eff
   -> Saga' env state input output a
-joinTask (SagaTask fiber) = liftAff $ joinFiber fiber
+joinTask (SagaTask fiber) =
+  liftAff $
+    joinFiber fiber
+      `cancelWith` (Canceler \e ->
+        killFiber e fiber
+      )
 
 cancelTask
   :: ∀ env state input output a eff
@@ -268,20 +272,6 @@ type Saga env state action a = Saga' env state action action a
 
 newtype SagaTask a eff = SagaTask (Fiber (avar :: AVAR | eff) a)
 
-raceTasks
-  :: ∀ a eff env state input output
-   . SagaTask a eff
-  -> SagaTask a eff
-  -> Saga' env state input output a
-raceTasks (SagaTask t1) (SagaTask t2) =
-  liftAff do
-    result <- sequential $
-      parallel (Left  <$> joinFiber t1) <|>
-      parallel (Right <$> joinFiber t2)
-    case result of
-      Right v -> v <$ (forkAff (killFiber (error "REDUX_SAGA_CANCEL_TASK") t1))
-      Left  v -> v <$ (forkAff (killFiber (error "REDUX_SAGA_CANCEL_TASK") t2))
-
 newtype Saga' env state input output a
   = Saga' (
       P.Pipe
@@ -303,9 +293,15 @@ derive newtype instance monadErrorSaga :: MonadError Error (Saga' env state inpu
 
 instance altSaga :: Alt (Saga' env state input action) where
   alt s1 s2 = do
-    t1 <- fork s1
-    t2 <- fork s2
-    raceTasks t1 t2
+    t1@(SagaTask f1) <- forkNamed "L" s1
+    t2@(SagaTask f2) <- forkNamed "R" s2
+    result <- liftAff do
+      sequential $
+        parallel (Left  <$> joinFiber f1) <|>
+        parallel (Right <$> joinFiber f2)
+    case result of
+      Left  v -> v <$ cancelTask t2
+      Right v -> v <$ cancelTask t1
 
 instance monadAskSaga :: MonadAsk env (Saga' env state input action) where
   ask = fst <$> Saga' (lift ask)

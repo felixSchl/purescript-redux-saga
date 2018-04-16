@@ -6,6 +6,7 @@ import Redux.Saga.Combinators (debounce)
 
 import Control.Monad.Aff (delay, forkAff)
 import Control.Monad.Aff.AVar (makeEmptyVar, takeVar, putVar)
+import Control.Alt (class Alt, (<|>))
 import Control.Monad.Aff.Class (liftAff)
 import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Class (liftEff)
@@ -303,6 +304,36 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
 
               liftEff (readRef ref) >>= liftIO <<< done
           r `shouldEqual` [1, 2, 3]
+
+        it "should be able to cancel forks (3)" do
+          r <- runIO' $ withCompletionVar \done -> do
+            void $ mkStore (wrap $ const id) {} do
+              ref <- liftEff $ newRef []
+
+              aT <- forkNamed "a" $ do
+                liftEff $ modifyRef ref $ flip A.snoc "a:start"
+                liftAff $ delay $ 20.0 # Milliseconds
+                liftEff $ modifyRef ref $ flip A.snoc "a:done"
+                pure "a"
+
+              bT <- forkNamed "b" $ "b" <$ do
+                forever $ do
+                  liftEff $ modifyRef ref $ flip A.snoc "b"
+                  liftAff $ delay $ 10.0 # Milliseconds
+
+              cT <- forkNamed "c" $ "c" <$ do
+                forever $ do
+                  liftEff $ modifyRef ref $ flip A.snoc "c"
+                  liftAff $ delay $ 10.0 # Milliseconds
+
+              x <- joinTask aT <|> joinTask bT <|> joinTask cT
+              liftAff $ x `shouldEqual` "a"
+
+              -- this tests that 'b' and 'c' are no longer writing to the ref
+              liftAff $ delay $ 20.0 # Milliseconds
+
+              liftEff (readRef ref) >>= liftIO <<< done
+          r `shouldEqual` ["a:start", "b", "c", "b", "c", "a:done"]
 
         it "debounce" do
           x <- runIO' $ withCompletionVar \done -> do
