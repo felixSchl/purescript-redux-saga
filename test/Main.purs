@@ -4,13 +4,14 @@ import Prelude
 import Redux.Saga
 
 import Control.Alt (class Alt, (<|>))
-import Control.Monad.Aff (bracket, delay, forkAff, joinFiber, killFiber, supervise, throwError)
+import Control.Monad.Aff (bracket, catchError, delay, forkAff, joinFiber, killFiber, supervise, throwError)
+import Control.Monad.Aff as Error
 import Control.Monad.Aff.AVar (makeEmptyVar, takeVar, putVar)
 import Control.Monad.Aff.Class (liftAff)
 import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Class (liftEff)
 import Control.Monad.Eff.Exception (error)
-import Control.Monad.Eff.Ref (modifyRef, newRef, readRef)
+import Control.Monad.Eff.Ref (modifyRef, newRef, readRef, writeRef)
 import Control.Monad.Error.Class (throwError)
 import Control.Monad.IO (IO, runIO')
 import Control.Monad.IO.Class (liftIO)
@@ -61,38 +62,6 @@ main :: Eff _ Unit
 main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
   describe "sagas" do
     describe "take" do
-
-      -- itOnly "..." do
-      --   fiber <- forkAff $ do
-      --     fiber <- forkAff $ do
-      --       fiber <- forkAff $ forever do
-      --         delay $ 100.0 # Milliseconds
-      --         traceAnyA "a"
-      --       delay $ 100.0 # Milliseconds
-      --       joinFiber fiber
-      --     delay $ 50.0 # Milliseconds
-      --     killFiber (error "xxx") fiber
-      --     delay $ 1000.0 # Milliseconds
-      --   joinFiber fiber
-
-      -- itOnly "..." do
-      --   fiber <- forkAff do
-      --     bracket
-      --       (forkAff do
-      --         forever do
-      --           delay $ 100.0 # Milliseconds
-      --           traceAnyA "a"
-      --        )
-      --        (killFiber $ error "DONE")
-      --        (\fiber -> do
-      --           delay $ 100.0 # Milliseconds
-      --           joinFiber fiber
-      --        )
-      --   delay $ 50.0 # Milliseconds
-      --   killFiber (error "...") fiber
-      --   forever do
-      --     delay $ 10.0 # Milliseconds
-
       it "should be able to miss events" do
         r <- runIO' $ withCompletionVar \done -> do
           void $ mkStore (wrap $ const id) {} do
@@ -112,7 +81,8 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
         r <- runIO' $ withCompletionVar \done -> do
           void $ mkStore (wrap $ const id) {} do
             void $ fork do
-              x <- take \i -> pure (pure i)
+              x <- take \i -> do
+                Just (pure i)
               liftIO $ done x
             put 1
         r `shouldEqual` 1
@@ -171,6 +141,15 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
             void $ fork do
               liftAff $ void $ throwError $ error "oh no"
 
+      -- TODO: How to actually catch these? or at least test that it's
+      -- actually crashing
+      pending' "sub-sagas should bubble up errors" do
+        void $ runIO' $ withCompletionVar \_ -> do
+          void $ mkStore (wrap $ const id) {} do
+            void $ fork do
+              liftAff $ void $ throwError $ error "oh no"
+            void $ take case _ of _ -> Nothing
+
     describe "put" do
       it "should not overflow the stack" do
         let target = 500
@@ -215,7 +194,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
       it "should be joinable" do
         runIO' $ withCompletionVar \done -> do
           void $ mkStore (wrap $ const id) {} do
-            t <- fork do
+            t <- forkNamed "waiter" do
               liftAff $ delay $ 100.0 # Milliseconds
             joinTask t
             liftIO $ done unit
@@ -295,8 +274,8 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
         it "should be able to cancel forks" do
           x <- runIO' $ withCompletionVar \done -> do
             void $ mkStore (wrap $ const id) {} do
-              task <- fork do
-                task' <- fork do
+              task <- forkNamed "level 1" do
+                task' <- forkNamed "level 2" do
                   liftAff $ void $ forever do
                     delay $ 0.0 # Milliseconds
                   liftIO $ done false
@@ -336,6 +315,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
 
               liftEff (readRef ref) >>= liftIO <<< done
           r `shouldEqual` [1, 2, 3]
+          liftAff $ delay $ 10.0 # Milliseconds
 
         it "should be able to cancel forks (3)" do
           r <- runIO' $ withCompletionVar \done -> do
@@ -349,6 +329,10 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
                 pure "a"
 
               bT <- forkNamed "b" $ "b" <$ do
+                _ <- forkNamed "b" $ "b" <$ do
+                  forever $ do
+                    liftEff $ modifyRef ref $ flip A.snoc "b"
+                    liftAff $ delay $ 10.0 # Milliseconds
                 forever $ do
                   liftEff $ modifyRef ref $ flip A.snoc "b"
                   liftAff $ delay $ 10.0 # Milliseconds
@@ -365,7 +349,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
               liftAff $ delay $ 20.0 # Milliseconds
 
               liftEff (readRef ref) >>= liftIO <<< done
-          r `shouldEqual` ["a:start", "b", "c", "b", "c", "a:done"]
+          r `shouldEqual` ["a:start", "b", "b", "c", "b", "b", "c", "a:done"]
 
         it "should be able to cancel forks (4)" do
           r <- runIO' $ withCompletionVar \done -> do
@@ -399,6 +383,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
 
               liftEff (readRef ref) >>= liftIO <<< done
           r `shouldEqual` unit
+          liftAff $ delay $ 10.0 # Milliseconds
 
         it "debounce" do
           x <- runIO' $ withCompletionVar \done -> do
