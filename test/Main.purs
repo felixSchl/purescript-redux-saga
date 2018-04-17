@@ -2,11 +2,10 @@ module Test.Main where
 
 import Prelude
 import Redux.Saga
-import Redux.Saga.Combinators (debounce)
 
-import Control.Monad.Aff (delay, forkAff)
-import Control.Monad.Aff.AVar (makeEmptyVar, takeVar, putVar)
 import Control.Alt (class Alt, (<|>))
+import Control.Monad.Aff (bracket, delay, forkAff, joinFiber, killFiber, supervise, throwError)
+import Control.Monad.Aff.AVar (makeEmptyVar, takeVar, putVar)
 import Control.Monad.Aff.Class (liftAff)
 import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Class (liftEff)
@@ -26,6 +25,7 @@ import Data.Newtype (wrap)
 import Data.Time.Duration (Milliseconds(..))
 import Debug.Trace (traceAnyA)
 import React.Redux as Redux
+import Redux.Saga.Combinators (debounce)
 import Test.Spec (describe, describeOnly, it, itOnly, pending')
 import Test.Spec.Assertions (shouldEqual)
 import Test.Spec.Reporter.Console (consoleReporter)
@@ -61,6 +61,38 @@ main :: Eff _ Unit
 main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
   describe "sagas" do
     describe "take" do
+
+      -- itOnly "..." do
+      --   fiber <- forkAff $ do
+      --     fiber <- forkAff $ do
+      --       fiber <- forkAff $ forever do
+      --         delay $ 100.0 # Milliseconds
+      --         traceAnyA "a"
+      --       delay $ 100.0 # Milliseconds
+      --       joinFiber fiber
+      --     delay $ 50.0 # Milliseconds
+      --     killFiber (error "xxx") fiber
+      --     delay $ 1000.0 # Milliseconds
+      --   joinFiber fiber
+
+      -- itOnly "..." do
+      --   fiber <- forkAff do
+      --     bracket
+      --       (forkAff do
+      --         forever do
+      --           delay $ 100.0 # Milliseconds
+      --           traceAnyA "a"
+      --        )
+      --        (killFiber $ error "DONE")
+      --        (\fiber -> do
+      --           delay $ 100.0 # Milliseconds
+      --           joinFiber fiber
+      --        )
+      --   delay $ 50.0 # Milliseconds
+      --   killFiber (error "...") fiber
+      --   forever do
+      --     delay $ 10.0 # Milliseconds
+
       it "should be able to miss events" do
         r <- runIO' $ withCompletionVar \done -> do
           void $ mkStore (wrap $ const id) {} do
@@ -334,6 +366,39 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
 
               liftEff (readRef ref) >>= liftIO <<< done
           r `shouldEqual` ["a:start", "b", "c", "b", "c", "a:done"]
+
+        it "should be able to cancel forks (4)" do
+          r <- runIO' $ withCompletionVar \done -> do
+            void $ mkStore (wrap $ const id) {} do
+              ref <- liftEff $ newRef unit
+              let saga = do
+                    aT <- forkNamed "a" $ do
+                      localEnv id do
+                        t <- forkNamed "a level 2" do
+                          liftAff $ delay $ 20.0 # Milliseconds
+                          pure "a"
+                        joinTask t
+
+                    bT <-
+                      forkNamed "foo" $ "b(0)" <$ do
+                        forkNamed "b(1)" $ do
+                          forkNamed "b(2)" $ do
+                            take case _ of _ -> Nothing
+
+                    cT <-
+                      forkNamed "foo" $ "c(0)" <$ do
+                        forkNamed "c(1)" $ do
+                          forkNamed "c(2)" $ do
+                            take case _ of _ -> Nothing
+
+                    (joinTask aT <|> joinTask bT) <|> joinTask cT
+
+              uT <- forkNamed "uT" saga
+              yT <- forkNamed "yT" saga
+              void $ joinTask uT <|> joinTask yT
+
+              liftEff (readRef ref) >>= liftIO <<< done
+          r `shouldEqual` unit
 
         it "debounce" do
           x <- runIO' $ withCompletionVar \done -> do
