@@ -10,7 +10,7 @@ import Control.Monad.Aff.Class (liftAff)
 import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Class (liftEff)
 import Control.Monad.Eff.Exception (error)
-import Control.Monad.Eff.Ref (modifyRef, newRef, readRef)
+import Control.Monad.Eff.Ref (modifyRef, newRef, readRef, writeRef)
 import Control.Monad.Error.Class (throwError)
 import Control.Monad.IO (IO, runIO')
 import Control.Monad.IO.Class (liftIO)
@@ -62,6 +62,23 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
   describe "sagas" do
     describe "take" do
 
+      -- itOnly "...." do
+      --   ref <- liftEff $ newRef Nothing
+      --   fiber <- supervise do
+      --     forkAff do
+      --       supervise do
+      --         forkAff do
+      --           var <- makeEmptyVar
+      --           liftEff $ writeRef ref (Just var)
+      --           x <- takeVar var
+      --           traceAnyA x
+      --   delay $ 10.0 # Milliseconds
+      --   killFiber (error "green") fiber
+      --   mVar <- liftEff $ readRef ref
+      --   for_ mVar \var -> do
+      --     putVar "oh no!" var
+      --   delay $ 10.0 # Milliseconds
+
       -- itOnly "..." do
       --   fiber <- forkAff $ do
       --     fiber <- forkAff $ do
@@ -112,9 +129,15 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
         r <- runIO' $ withCompletionVar \done -> do
           void $ mkStore (wrap $ const id) {} do
             void $ fork do
-              x <- take \i -> pure (pure i)
+              traceAnyA "a"
+              x <- take \i -> do
+                traceAnyA $ "I: " <> show i
+                Just (pure i)
+              traceAnyA "b"
               liftIO $ done x
+            traceAnyA "c"
             put 1
+            traceAnyA "d"
         r `shouldEqual` 1
 
       it "should ignore non-matching actions" do
@@ -184,7 +207,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
             liftEff (readRef ref) >>= liftIO <<< done
         v `shouldEqual` target
 
-    describe "forks" do
+    describeOnly "forks" do
       describe "local envs" do
         it "should work" do
           r <- runIO' $ withCompletionVar \done -> do
@@ -212,7 +235,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
             liftIO $ done true
         x `shouldEqual` true
 
-      it "should be joinable" do
+      itOnly "should be joinable" do
         runIO' $ withCompletionVar \done -> do
           void $ mkStore (wrap $ const id) {} do
             t <- fork do
@@ -349,6 +372,10 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
                 pure "a"
 
               bT <- forkNamed "b" $ "b" <$ do
+                _ <- forkNamed "b" $ "b" <$ do
+                  forever $ do
+                    liftEff $ modifyRef ref $ flip A.snoc "b"
+                    liftAff $ delay $ 10.0 # Milliseconds
                 forever $ do
                   liftEff $ modifyRef ref $ flip A.snoc "b"
                   liftAff $ delay $ 10.0 # Milliseconds

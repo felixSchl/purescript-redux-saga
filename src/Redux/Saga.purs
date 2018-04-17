@@ -3,10 +3,12 @@ module Redux.Saga
   , Saga
   , Saga'
   , SagaPipe
-  , SagaThread
-  , SagaProc
-  , SagaTask
+  , SagaFiber
+  , ThreadContext
   , IdSupply
+  , KeepAlive
+  , Label
+  , GlobalState
   , take
   , takeLatest
   , fork
@@ -24,7 +26,7 @@ module Redux.Saga
 import Prelude
 
 import Control.Alt (class Alt, (<|>))
-import Control.Monad.Aff (Canceler(Canceler), Fiber, apathize, attempt, bracket, cancelWith, delay, forkAff, joinFiber, killFiber, launchAff, supervise)
+import Control.Monad.Aff (Canceler(Canceler), Error, Fiber, apathize, attempt, bracket, cancelWith, delay, forkAff, generalBracket, joinFiber, killFiber, launchAff, supervise)
 import Control.Monad.Aff.AVar (AVAR, AVar, killVar, makeEmptyVar, putVar, readVar, takeVar, tryTakeVar)
 import Control.Monad.Aff.Class (class MonadAff, liftAff)
 import Control.Monad.Aff.Unsafe (unsafeCoerceAff)
@@ -44,15 +46,17 @@ import Control.Monad.Rec.Class (class MonadRec)
 import Control.Monad.Trans.Class (lift)
 import Control.Parallel (parallel, sequential)
 import Data.Array (any)
+import Data.Array as A
 import Data.Array as Array
 import Data.Either (Either(Right, Left))
 import Data.Foldable (for_)
 import Data.Maybe (Maybe(..), maybe)
-import Data.Newtype (class Newtype, wrap)
+import Data.Newtype (class Newtype, unwrap, wrap)
 import Data.Time.Duration (Milliseconds(..))
 import Data.Traversable (traverse_)
 import Data.Tuple (fst)
 import Data.Tuple.Nested ((/\), type (/\))
+import Debug.Trace (traceAny, traceAnyA)
 import Pipes ((>->))
 import Pipes (await, for, yield) as P
 import Pipes.Aff (Input, Output, fromInput, fromInput', input, new, output, realTime, seal, send, send', spawn) as P
@@ -64,62 +68,23 @@ unsafeCoerceFiberEff :: ∀ m eff eff2 a. Fiber eff a -> Fiber eff2 a
 unsafeCoerceFiberEff = unsafeCoerce
 
 debugA :: ∀ a b. Show b => Applicative a => b -> a Unit
-debugA _ = pure unit
--- debugA = traceAnyA
+-- debugA _ = pure unit
+debugA = traceAnyA
+
+_NOT_IMPLEMENTED_ERROR :: Error
+_NOT_IMPLEMENTED_ERROR = error "NOT_IMPLEMENTED"
+
+_COMPLETED_SENTINEL :: Error
+_COMPLETED_SENTINEL = error "REDUX_SAGA_COMPLETED"
 
 channel
   :: ∀ env input input' action state a eff
    . String
   -> ((input' -> IO Unit) -> IO Unit)
   -> Saga' env state (Either input input') action a
-  -> Saga' env state input action (SagaTask (Maybe a) eff)
+  -> Saga' env state input action (SagaFiber (Maybe a) eff)
 channel tag cb (Saga' saga) = do
-  env /\ parentThread  <- Saga' $ lift ask
-
-  let tag' = parentThread.tag <> ">" <> tag
-      log :: String -> IO Unit
-      log msg = debugA $ "fork (" <> tag' <> "): " <> msg
-
-  chan <- liftAff $ P.spawn P.new
-
-  fiber <- liftAff $ forkAff $ runIO do
-    completionV :: AVar a <- liftAff $ makeEmptyVar
-    log "attaching child"
-
-    flip (attach $ tag' <> " - thread") parentThread \input seal -> do
-      log "spawning child process (thread)"
-      childThread <- liftIO $ mkThread tag' parentThread.idSupply parentThread.api
-
-      f1 <- liftAff $ forkAff $
-        runIO' $ flip (attach $ tag' <> " - task") childThread \input' seal' ->
-          void $ liftAff $
-            P.runEffectRec $
-              P.for (P.fromInput' input') \action ->
-                void $ liftAff $ forkAff $ P.send action chan
-
-      f2 <- liftAff $ forkAff $ runIO $
-        liftAff $
-          runIO' $
-            flip runReaderT (env /\ childThread) $
-              P.runEffectRec $
-                P.for (P.fromInput chan >-> do
-                  saga >>= liftAff <<< flip putVar completionV
-                ) \action ->
-                  void $ liftEff $
-                    unsafeCoerceEff $
-                      childThread.api.dispatch action
-
-      runThread Left input childThread
-      seal
-      liftAff $ joinFiber f1
-      liftAff $ joinFiber f2
-      pure unit
-
-    liftAff $ tryTakeVar completionV
-
-  liftIO $ cb (\value -> void $ liftAff $ forkAff $ P.send (Right value) chan)
-
-  pure $ SagaTask (unsafeCoerceFiberEff fiber)
+  liftAff $ throwError _NOT_IMPLEMENTED_ERROR
 
 take
   :: ∀ env state input output a
@@ -154,9 +119,9 @@ put action = Saga' do
 
 joinTask
   :: ∀ env state input output a eff
-   . SagaTask a eff
+   . SagaFiber _ a
   -> Saga' env state input output a
-joinTask (SagaTask fiber) =
+joinTask (SagaFiber { fiber }) =
   liftAff $
     joinFiber fiber
       `cancelWith` (Canceler \e ->
@@ -165,9 +130,9 @@ joinTask (SagaTask fiber) =
 
 cancelTask
   :: ∀ env state input output a eff
-   . SagaTask a eff
+   . SagaFiber _ a
   -> Saga' env state input output Unit
-cancelTask (SagaTask fiber) = void $
+cancelTask (SagaFiber { fiber }) = void $
   liftEff $
     launchAff $
       killFiber (error "REDUX_SAGA_CANCEL_TASK") fiber
@@ -176,7 +141,7 @@ select
   :: ∀ env state input output a
    . Saga' env state input output state
 select = do
-  _ /\ { api } <- Saga' (lift ask)
+  _ /\ { global: { api } } <- Saga' (lift ask)
   liftEff api.getState
 
 localEnv
@@ -191,21 +156,21 @@ localEnv f saga = do
 fork
   :: ∀ env state input output a eff
    . Saga' env state input output a
-  -> Saga' env state input output (SagaTask a eff)
+  -> Saga' env state input output (SagaFiber input a)
 fork = forkNamed "anonymous"
 
 fork'
   :: ∀ env newEnv state input output a eff
    . newEnv
   -> Saga' newEnv state input output a
-  -> Saga' env state input output (SagaTask a eff)
+  -> Saga' env state input output (SagaFiber input a)
 fork' = forkNamed' "anonymous"
 
 forkNamed
   :: ∀ env state input output a eff
    . String
   -> Saga' env state input output a
-  -> Saga' env state input output (SagaTask a eff)
+  -> Saga' env state input output (SagaFiber input a)
 forkNamed tag saga = do
   env <- ask
   forkNamed' tag env saga
@@ -215,67 +180,209 @@ forkNamed'
    . String
   -> newEnv
   -> Saga' newEnv state input output a
-  -> Saga' env state input output (SagaTask a eff)
+  -> Saga' env state input output (SagaFiber input a)
 forkNamed' tag env saga = do
   _ /\ thread <- Saga' (lift ask)
   liftIO $ _fork false tag thread env saga
 
+type KeepAlive = Boolean
+type Label = String
+
+-- | Fork a saga off the current thread.
+-- We must be sure to safely acquire a new fibre and advertise it to the thread
+-- for management. We spawn a completely detached `Aff` computation in order not
+-- be directly affected by cancelation handling, but instead to rely on the
+-- containing thread to clean this up.
 _fork
   :: ∀ env state input output a eff
-   . Boolean
-  -> String
-  -> SagaThread state input output
-  -> env
-  -> Saga' env state input output a
-  -> IO (SagaTask a eff)
-_fork keepAlive tag parentThread env (Saga' saga) = do
-  let tag' = parentThread.tag <> ">" <> tag
+   . KeepAlive                      -- ^ keep running even with no input
+  -> Label                          -- ^ a name tag
+  -> ThreadContext state input output  -- ^ the thread we're forking off from
+  -> env                            -- ^ the environment for sagas
+  -> Saga' env state input output a -- ^ the saga to evaluate
+  -> IO (SagaFiber input a)
+_fork keepAlive tag thread env (Saga' saga) = do
+  let tag' = thread.tag <> ">" <> tag
       log :: String -> IO Unit
       log msg = debugA $ "fork (" <> tag' <> "): " <> msg
-  log $ "starting keepAlive=" <> show keepAlive
-  childThread <- mkThread tag' parentThread.idSupply parentThread.api
-  fiber <- liftEff $ launchAff $ supervise $
-    bracket
-      makeEmptyVar
-      (apathize <<< killVar (error "DONE"))
-      \completionV -> runIO' do
-        log "attaching child"
-        flip (attach $ tag' <> " - thread") parentThread \input seal ->
-          liftAff $ runIO $ do
-            log "spawning child process (thread)"
-            f1 <- liftAff $ forkAff $ runIO do
-              log "attaching child process (task)"
-              liftAff $
-                runIO' $ flip (attach $ tag' <> " - task") childThread \input' seal' ->
-                  liftAff $
+
+  liftAff $ unsafeCoerceAff $
+    generalBracket
+      (do
+        channel   <- unsafeCoerceAff $ P.spawn P.realTime
+        channel_1 <- unsafeCoerceAff $ P.spawn P.realTime
+        channel_2 <- unsafeCoerceAff $ P.spawn P.realTime
+
+        { channel, fiberId: _, fiber: _ }
+          <$> (runIO' $ nextId thread.global.idSupply)
+          <*> (liftEff $ launchAff $
+                generalBracket
+                  (do
+                    completionV <- makeEmptyVar
+                    childThreadCtx <- runIO' $ newThreadContext thread.global tag'
+                    channelPipingFiber <- liftEff $ launchAff $ supervise $ do
+                      P.runEffectRec $
+                        P.for (P.fromInput channel) \v ->
+                          liftAff $ do
+                            void $ forkAff $ liftAff $ P.send v channel_1
+                            void $ forkAff $ liftAff $ P.send v channel_2
+                    childThreadFiber <- liftEff $ launchAff $ do
+                      traceAnyA "spawning child thread"
+                      runIO' $
+                        runThread id (P.input channel_2) childThreadCtx
+                    pure { completionV, childThreadFiber, childThreadCtx, channelPipingFiber }
+                  )
+                  { completed: const \{ completionV, childThreadFiber,  channelPipingFiber } -> do
+                      killFiber _COMPLETED_SENTINEL childThreadFiber
+                      killVar   _COMPLETED_SENTINEL completionV
+                      killFiber _COMPLETED_SENTINEL channelPipingFiber
+                      P.seal channel
+                  , failed: \e ({ completionV, childThreadFiber, channelPipingFiber }) -> do
+                      traceAnyA "fork failed"
+                      killFiber e childThreadFiber
+                      killFiber e channelPipingFiber
+                      killVar   e completionV
+                      P.seal channel
+                  , killed: \e ({ completionV, childThreadFiber, channelPipingFiber }) -> do
+                      traceAnyA "fork cancelled"
+                      killFiber e childThreadFiber
+                      killFiber e channelPipingFiber
+                      killVar   e completionV
+                      P.seal channel
+                  }
+                  \{ completionV, childThreadFiber, childThreadCtx } -> do
+
+                    traceAnyA "evaluating saga..."
                     runIO' $
-                      flip runReaderT (env /\ childThread) $ do
+                      flip runReaderT (env /\ childThreadCtx) $ do
                         P.runEffectRec $
-                          P.for (P.fromInput' input' >-> do
-                            saga >>= \val ->
-                              liftAff $
-                                apathize $
+                          P.for (
+                            P.fromInput' (P.input channel_1) >-> do
+                              saga >>= \val -> traceAny { val } \_ ->
+                                liftAff $
                                   putVar val completionV
                           ) \action -> do
-                            void $ liftEff $ unsafeCoerceEff $ childThread.api.dispatch action
-            runThread id input childThread
-            unless keepAlive do
-              log "sealing input"
-              seal
-            void $ liftAff $ joinFiber f1
-        liftAff $ takeVar completionV
-  pure $ SagaTask (unsafeCoerceFiberEff fiber)
+                            void $
+                              liftEff $
+                                unsafeCoerceEff $
+                                  thread.global.api.dispatch action
+
+                    traceAnyA "waiting for child..."
+                    void $ joinFiber childThreadFiber
+
+                    unless keepAlive $ do
+                      traceAnyA "sealing..."
+                      P.seal channel
+
+                    traceAnyA "waiting for completion..."
+                    takeVar completionV
+              )
+      )
+      { completed: const $ const $ pure unit
+      , failed: \e ({ channel, fiber }) -> do
+          traceAnyA "error establishing fork"
+          unsafeCoerceAff $ P.seal channel
+          unsafeCoerceAff $ killFiber e fiber
+      , killed: \e ({ channel, fiber }) -> do
+          traceAnyA "establishing fork canceld"
+          unsafeCoerceAff $ P.seal channel
+          unsafeCoerceAff $ killFiber e fiber
+      }
+      (\{ channel, fiber, fiberId } ->
+        let sagaFiber :: ∀ x. Fiber _ x -> SagaFiber input x
+            sagaFiber fiber' =
+              SagaFiber
+                { output: P.output channel
+                , fiberId
+                , fiber: fiber'
+                }
+         in sagaFiber (unsafeCoerceFiberEff fiber) <$ do
+              -- register this fiber with the tread.
+              unsafeCoerceAff $
+                liftEff $
+                  modifyRef thread.fibersRef $
+                    flip Array.snoc (sagaFiber $ void (unsafeCoerceFiberEff fiber))
+      )
+
+runThread
+  :: ∀ env state input input' output
+   . (input -> input')
+  -> P.Input input
+  -> ThreadContext state input' output
+  -> IO Unit
+runThread convert input thread =
+  let awaitFailureSignal = do
+        failure <- makeEmptyVar
+        takeVar failure
+
+      awaitActionCompletion = do
+
+        -- we consume the 'input' and pipe all values into all attached fibers.
+        -- TODO: capture `fiber` in a bracket and clean up
+        _fiber <- liftAff $ forkAff $ void $
+          P.runEffectRec $ P.for (P.fromInput' input) \value -> do
+            fibers <- liftEff $ readRef thread.fibersRef
+            lift $ for_ fibers \(SagaFiber { output }) -> do
+              traceAnyA $ thread.tag <> ": sending value along"
+              void $ forkAff $ P.send' (convert value) output
+
+        -- wait for any attached processes to start running by repeatedly checking
+        -- the mutable `fibersRef` cell and awaiting their computations to
+        -- conclude.
+        let awaitProcs = do
+              fibers <- unsafeCoerceAff $ liftEff $ readRef thread.fibersRef
+              unless (Array.null fibers) do
+                for_ fibers \(SagaFiber { fiber }) ->
+                  joinFiber fiber
+                unsafeCoerceAff $ liftEff $
+                  modifyRef thread.fibersRef $
+                    Array.filter \(SagaFiber { fiberId }) ->
+                      not $
+                        any (\(SagaFiber { fiberId: fiberId' }) ->
+                              fiberId == fiberId') fibers
+                awaitProcs
+
+        traceAnyA $ thread.tag <> ": runThread: awaitProcs"
+        unsafeCoerceAff awaitProcs
+
+        traceAnyA "runThread: joinFiber"
+        unsafeCoerceAff $ joinFiber _fiber
+
+        traceAnyA $ thread.tag <> ": runThread: done"
+
+      awaitCompletion =
+        liftAff $ sequential $
+          parallel (map Just awaitFailureSignal) <|>
+          parallel (Nothing <$ awaitActionCompletion)
+
+   in void $
+        liftAff $
+          awaitCompletion `cancelWith`
+            Canceler \e -> do
+              traceAnyA "thread was canceled:"
+              traceAnyA e
+              fibers <- unsafeCoerceAff $ liftEff $ readRef thread.fibersRef
+              unsafeCoerceAff $
+                for_ fibers \(SagaFiber { fiber }) ->
+                  killFiber e fiber
+
+newThreadContext
+  :: ∀ state input action
+   . GlobalState state action
+  -> Label
+  -> IO (ThreadContext state input action)
+newThreadContext global tag =
+  { global, tag, fibersRef: _ }
+    <$> (liftEff $ newRef [])
 
 type Saga env state action a = Saga' env state action action a
-
-newtype SagaTask a eff = SagaTask (Fiber (avar :: AVAR | eff) a)
 
 newtype Saga' env state input output a
   = Saga' (
       P.Pipe
         input
         output
-        (ReaderT (env /\ (SagaThread state input output)) IO)
+        (ReaderT (env /\ (ThreadContext state input output)) IO)
         a
     )
 
@@ -291,8 +398,8 @@ derive newtype instance monadErrorSaga :: MonadError Error (Saga' env state inpu
 
 instance altSaga :: Alt (Saga' env state input action) where
   alt s1 s2 = do
-    t1@(SagaTask f1) <- forkNamed "L" s1
-    t2@(SagaTask f2) <- forkNamed "R" s2
+    t1@(SagaFiber { fiber: f1 }) <- forkNamed "L" s1
+    t2@(SagaFiber { fiber: f2 }) <- forkNamed "R" s2
     result <- liftAff do
       sequential $
         parallel (Left  <$> joinFiber f1) <|>
@@ -322,22 +429,27 @@ type SagaPipe env state input action a
   = P.Pipe
       input
       action
-      (ReaderT (env /\ (SagaThread state input action)) IO)
+      (ReaderT (env /\ (ThreadContext state input action)) IO)
       a
 
-type SagaProc input
-  = { id :: Int
-    , output :: P.Output input
-    , successVar :: AVar Unit
-    , fiber :: Fiber (infinity :: INFINITY) Unit
+type GlobalState state action
+  = { idSupply :: IdSupply
+    , api :: Redux.MiddlewareAPI (infinity :: INFINITY) state action
     }
 
-type SagaThread state input action
-  = { procsRef :: Ref (Array (SagaProc input))
-    , idSupply :: IdSupply
-    , failureVar :: AVar Error
+-- | A `SagaFiber` is a single computation.
+newtype SagaFiber input a
+  = SagaFiber
+      { fiberId :: Int
+      , output :: P.Output input
+      , fiber :: Fiber (infinity :: INFINITY) a
+      }
+
+-- | A `ThreadContext` is a collection of saga fibers.
+type ThreadContext state input action
+  = { global :: GlobalState state action
     , tag :: String
-    , api :: Redux.MiddlewareAPI (infinity :: INFINITY) state action
+    , fibersRef :: Ref (Array (SagaFiber input Unit))
     }
 
 type Channel a state action
@@ -352,116 +464,6 @@ newIdSupply = IdSupply <$> liftEff (newRef 0)
 
 nextId :: IdSupply -> IO Int
 nextId (IdSupply ref) = liftEff $ modifyRef' ref \value -> { state: value + 1, value }
-
-mkThread
-  :: ∀ state input output
-   . String
-  -> IdSupply
-  -> Redux.MiddlewareAPI (infinity :: INFINITY) state output
-  -> IO (SagaThread state input output)
-mkThread tag idSupply api = do
-  failureVar <- liftAff $ makeEmptyVar
-  procsRef   <- liftEff $ newRef []
-  pure { tag, idSupply, procsRef, failureVar, api }
-
-runThread
-  :: ∀ env state input input' output
-   . (input -> input')
-  -> P.Input input
-  -> SagaThread state input' output
-  -> IO Unit
-runThread f input thread = do
-  let log :: String -> IO Unit
-      log msg = debugA $ "runThread (" <> thread.tag <> "): " <> msg
-
-  result <- liftAff $ sequential do
-    parallel (Just <$> readVar thread.failureVar) <|> do
-      Nothing <$ parallel do
-        runIO' $ do
-          log "running input pipe"
-
-          void $ liftEff $ launchAff $ do
-            P.runEffectRec $ P.for (P.fromInput' input) \value -> do
-              procs <- liftEff $ readRef thread.procsRef
-              lift $ for_ procs \{ output, id } -> do
-                runIO' $ log $ "sending value downstream to: pid "  <> show id
-                void $ forkAff $ P.send' (f value) output
-            runIO' $ log "input pipe exhausted"
-
-          -- wait for any attached processes to start running by repeatedly checking
-          -- the mutable `procsRef` cell and awaiting their computations to
-          -- conclude.
-          let awaitProcs = do
-                procs <- liftEff $ readRef thread.procsRef
-                log $ "waiting for " <> show (Array.length procs) <> " processes to finish running..."
-                unless (Array.null procs) do
-                  liftAff $ for_ procs (readVar <<< _.successVar)
-                  liftEff $ modifyRef thread.procsRef $ Array.filter \{ id } ->
-                    not $ any ((id == _) <<< _.id) procs
-                  awaitProcs
-
-          log "waiting for processes..."
-          awaitProcs
-          log "finished"
-
-  case result of
-    Just err -> do
-      if Error.message err == "REDUX_SAGA_CANCEL_TASK"
-        then log $ "cancelled"
-        else do
-          log $ "finished with error"
-          throwError err
-
-      log "cancelling processes"
-      procs <- liftEff $ readRef thread.procsRef
-      liftAff $ for_ procs (liftEff <<< launchAff <<< killFiber err <<< _.fiber)
-    _ -> void do
-      log $ "finished"
-
--- |
-attach
-  :: ∀ state input output a
-   . String
-  -> (P.Input input -> IO Unit -> IO a)
-  -> SagaThread state input output
-  -> IO Unit
-attach tag f thread = do
-  pid <- nextId $ thread.idSupply
-
-  let log :: String -> IO Unit
-      log msg = debugA $ "attach (" <> tag <>  ", pid=" <> show pid <> "): " <> msg
-
-  liftAff $ do
-    chan <- P.spawn P.realTime
-    successVar <- makeEmptyVar
-    fiber <- unsafeCoerceAff $ forkAff do
-      result <- attempt $ runIO $ f (P.input chan) (liftAff $ P.seal chan)
-      unsafeCoerceAff case result of
-        Right _ -> do
-          putVar unit successVar
-        Left e ->
-          let e' =
-                error $
-                  "Process (" <> tag <> ", pid=" <> show pid <> ") terminated due to error"
-                    <> maybe "" (", stack trace follows:\n" <> _) (stack e)
-           in putVar e' thread.failureVar
-
-    liftEff $ modifyRef thread.procsRef $
-      flip Array.snoc $
-        { id: pid
-        , output: P.output chan
-        , successVar
-        , fiber
-        }
-
-    unsafeCoerceAff $
-      joinFiber fiber
-        `cancelWith`
-          (Canceler \error -> void $ runIO do
-            log "cancelling..."
-            liftAff $ P.seal chan
-            liftAff $ putVar unit successVar
-          )
 
 {-
   Install and initialize the saga middleware.
@@ -482,6 +484,7 @@ sagaMiddleware saga = wrap $ \api ->
         = unsafePerformEff do
             refOutput <- newRef Nothing
             refCallbacks  <- newRef []
+
             _ <- launchAff do
               chan <- P.spawn P.realTime
               callbacks <- liftEff $ modifyRef' refCallbacks \value -> { state: [], value }
@@ -489,13 +492,14 @@ sagaMiddleware saga = wrap $ \api ->
               liftEff $ modifyRef refOutput (const $ Just $ P.output chan)
               runIO' do
                 idSupply <- newIdSupply
-                thread <- mkThread "root" idSupply (unsafeCoerce api)
+                thread <- newThreadContext { idSupply, api: unsafeCoerce api } "root"
                 task <- _fork true "main" thread unit saga
                 flip catchError
                   (\e ->
                     let msg = maybe "" (", stack trace follows:\n" <> _) $ stack e
                      in throwError $ error $ "Saga terminated due to error" <> msg)
                   $ runThread id (P.input chan) thread
+
             pure \action -> void do
               readRef refOutput >>= case _ of
                 Just output ->
