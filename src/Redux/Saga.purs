@@ -26,7 +26,7 @@ module Redux.Saga
 import Prelude
 
 import Control.Alt (class Alt, (<|>))
-import Control.Monad.Aff (Canceler(Canceler), Error, Fiber, apathize, attempt, bracket, cancelWith, delay, forkAff, generalBracket, invincible, joinFiber, killFiber, launchAff, supervise)
+import Control.Monad.Aff (Canceler(Canceler), Error, Fiber, apathize, attempt, bracket, cancelWith, delay, forkAff, generalBracket, invincible, joinFiber, killFiber, launchAff, supervise, throwError)
 import Control.Monad.Aff.AVar (AVAR, AVar, killVar, makeEmptyVar, putVar, readVar, takeVar, tryTakeVar)
 import Control.Monad.Aff.Class (class MonadAff, liftAff)
 import Control.Monad.Aff.Unsafe (unsafeCoerceAff)
@@ -68,8 +68,8 @@ unsafeCoerceFiberEff :: ∀ m eff eff2 a. Fiber eff a -> Fiber eff2 a
 unsafeCoerceFiberEff = unsafeCoerce
 
 debugA :: ∀ a b. Show b => Applicative a => b -> a Unit
--- debugA _ = pure unit
-debugA = traceAnyA
+debugA _ = pure unit
+-- debugA = traceAnyA
 
 _NOT_IMPLEMENTED_ERROR :: Error
 _NOT_IMPLEMENTED_ERROR = error "NOT_IMPLEMENTED"
@@ -86,8 +86,11 @@ channel
   -> ((input' -> IO Unit) -> IO Unit)
   -> Saga' env state (Either input input') action a
   -> Saga' env state input action (SagaFiber (Maybe a) eff)
-channel tag cb (Saga' saga) = do
-  liftAff $ throwError _NOT_IMPLEMENTED_ERROR
+channel tag cb saga = do
+  throwError _NOT_IMPLEMENTED_ERROR
+
+  -- env /\ thread <- Saga' (lift ask)
+  -- liftIO $ _fork false tag Left (\cb' -> cb \i -> cb' (Right i)) thread env (Nothing <$ saga)
 
 take
   :: ∀ env state input output a
@@ -128,7 +131,7 @@ joinTask (SagaFiber { fiber, fiberId }) =
   liftAff $
     joinFiber fiber
       `cancelWith` (Canceler \e -> do
-        traceAnyA $ "joinTask: killing joined fiber " <> show fiberId
+        debugA $ "joinTask: killing joined fiber " <> show fiberId
         killFiber e fiber
       )
 
@@ -185,7 +188,7 @@ forkNamed'
   -> Saga' env state input output (SagaFiber input a)
 forkNamed' tag env saga = do
   _ /\ thread <- Saga' (lift ask)
-  liftIO $ _fork false tag thread env saga
+  liftIO $ _fork false tag id (const $ pure unit) thread env saga
 
 type KeepAlive = Boolean
 type Label = String
@@ -196,14 +199,16 @@ type Label = String
 -- be directly affected by cancelation handling, but instead to rely on the
 -- containing thread to clean this up.
 _fork
-  :: ∀ env state input output a eff
-   . KeepAlive                      -- ^ keep running even with no input
-  -> Label                          -- ^ a name tag
-  -> ThreadContext state input output  -- ^ the thread we're forking off from
-  -> env                            -- ^ the environment for sagas
-  -> Saga' env state input output a -- ^ the saga to evaluate
-  -> IO (SagaFiber input a)
-_fork keepAlive tag thread env (Saga' saga) = do
+  :: ∀ env state input input' output a eff
+   . KeepAlive                         -- ^ keep running even with no input
+  -> Label                             -- ^ a name tag
+  -> (input -> input')
+  -> ((input' -> IO Unit) -> IO Unit)
+  -> ThreadContext state input' output -- ^ the thread we're forking off from
+  -> env                               -- ^ the environment for sagas
+  -> Saga' env state input' output a   -- ^ the saga to evaluate
+  -> IO (SagaFiber input' a)
+_fork keepAlive tag convert inject thread env (Saga' saga) = do
   fiberId <- nextId thread.global.idSupply
 
   let tag' = thread.tag <> ">" <> tag <> " (" <> show fiberId <> ")"
@@ -229,44 +234,44 @@ _fork keepAlive tag thread env (Saga' saga) = do
                             void $ forkAff $ apathize $ liftAff $ P.send v channel_1
                             void $ forkAff $ apathize $ liftAff $ P.send v channel_2
                     childThreadFiber <- liftEff $ launchAff $ do
-                      traceAnyA $ tag' <> ": _fork: spawning child thread"
+                      debugA $ tag' <> ": _fork: spawning child thread"
                       runIO' $
                         runThread id (P.input channel_2) childThreadCtx (Just completionV)
-                      traceAnyA $ tag' <> ": _fork: child thread finished"
+                      debugA $ tag' <> ": _fork: child thread finished"
                     pure { completionV, childThreadFiber, childThreadCtx, channelPipingFiber }
                   )
                   { completed: const \{ completionV, childThreadFiber,  channelPipingFiber } -> do
-                      traceAnyA $ tag' <> ": _fork: completed: killing child thread..."
+                      debugA $ tag' <> ": _fork: completed: killing child thread..."
                       killFiber _COMPLETED_SENTINEL childThreadFiber
-                      traceAnyA $ tag' <> ": _fork: completed: killing completionV..."
+                      debugA $ tag' <> ": _fork: completed: killing completionV..."
                       killVar   _COMPLETED_SENTINEL completionV
-                      traceAnyA $ tag' <> ": _fork: completed: killing channel piping fiber..."
+                      debugA $ tag' <> ": _fork: completed: killing channel piping fiber..."
                       killFiber _COMPLETED_SENTINEL channelPipingFiber
-                      traceAnyA $ tag' <> ": _fork: completed: sealing channel..."
+                      debugA $ tag' <> ": _fork: completed: sealing channel..."
                       -- P.seal channel
-                      traceAnyA $ tag' <> ": _fork: completed: complete"
+                      debugA $ tag' <> ": _fork: completed: complete"
 
                   , failed: \e ({ completionV, childThreadFiber, channelPipingFiber }) -> do
-                      traceAnyA $ tag' <> ": _fork: failed: killing child thread fiber..."
+                      debugA $ tag' <> ": _fork: failed: killing child thread fiber..."
                       killFiber e childThreadFiber
-                      traceAnyA $ tag' <> ": _fork: failed: killing channel piping fiber..."
+                      debugA $ tag' <> ": _fork: failed: killing channel piping fiber..."
                       killFiber e channelPipingFiber
-                      traceAnyA $ tag' <> ": _fork: failed: killing completionV..."
+                      debugA $ tag' <> ": _fork: failed: killing completionV..."
                       killVar   e completionV
-                      traceAnyA $ tag' <> ": _fork: failed: complete"
+                      debugA $ tag' <> ": _fork: failed: complete"
                       -- P.seal channel
                   , killed: \e ({ completionV, childThreadFiber, channelPipingFiber }) -> do
-                      traceAnyA $ tag' <> ": _fork: killed: killing child thread fiber..."
+                      debugA $ tag' <> ": _fork: killed: killing child thread fiber..."
                       killFiber e childThreadFiber
-                      traceAnyA $ tag' <> ": _fork: killed: killing channel piping fiber..."
+                      debugA $ tag' <> ": _fork: killed: killing channel piping fiber..."
                       killFiber e channelPipingFiber
-                      traceAnyA $ tag' <> ": _fork: killed: killing completionV..."
+                      debugA $ tag' <> ": _fork: killed: killing completionV..."
                       killVar   e completionV
-                      traceAnyA $ tag' <> ": _fork: killed: complete"
+                      debugA $ tag' <> ": _fork: killed: complete"
                       P.seal channel
                   }
                   \{ completionV, childThreadFiber, childThreadCtx } -> do
-                    traceAnyA $ tag' <> ": _fork: evaluating saga..."
+                    debugA $ tag' <> ": _fork: evaluating saga..."
                     runIO' $
                       flip runReaderT (env /\ childThreadCtx) $ do
                         P.runEffectRec $
@@ -274,48 +279,48 @@ _fork keepAlive tag thread env (Saga' saga) = do
                             P.fromInput' (P.input channel_1) >-> do
                               saga >>= \val -> do
                                 liftAff $ do
-                                  traceAnyA $ tag' <> ": _fork: signaling completion"
+                                  debugA $ tag' <> ": _fork: signaling completion"
                                   putVar val completionV
-                                  traceAnyA $ tag' <> ": _fork: signaled completion"
+                                  debugA $ tag' <> ": _fork: signaled completion"
                           ) \action -> do
                             void $
                               liftEff $
                                 unsafeCoerceEff $
                                   thread.global.api.dispatch action
 
-                    traceAnyA $ tag' <> ": _fork: waiting for child..."
+                    debugA $ tag' <> ": _fork: waiting for child..."
                     void $ joinFiber childThreadFiber
 
                     unless keepAlive $ do
-                      traceAnyA $ tag' <> ": _fork: sealing channels..."
+                      debugA $ tag' <> ": _fork: sealing channels..."
                       P.seal channel
                       P.seal channel_1
                       P.seal channel_2
 
-                    traceAnyA $ tag' <> ": _fork: waiting for completion..."
+                    debugA $ tag' <> ": _fork: waiting for completion..."
                     result <- takeVar completionV
 
-                    traceAnyA $ tag' <> ": _fork: completed"
+                    debugA $ tag' <> ": _fork: completed"
                     pure result
               )
       )
       { completed: \v _ -> do
-          traceAnyA $ tag' <> ": _fork: fork established"
+          debugA $ tag' <> ": _fork: fork established"
       , failed: \e ({ channel, fiber }) -> do
-          traceAnyA $ tag' <> ": _fork: failed: sealing channel..."
+          debugA $ tag' <> ": _fork: failed: sealing channel..."
           unsafeCoerceAff $ P.seal channel
-          traceAnyA $ tag' <> ": _fork: failed: killing fiber..."
+          debugA $ tag' <> ": _fork: failed: killing fiber..."
           unsafeCoerceAff $ killFiber e fiber
-          traceAnyA $ tag' <> ": _fork: failed: done"
+          debugA $ tag' <> ": _fork: failed: done"
       , killed: \e ({ channel, fiberId, fiber }) -> do
-          traceAnyA $ tag' <> ": _fork: killed: sealing channel..."
+          debugA $ tag' <> ": _fork: killed: sealing channel..."
           unsafeCoerceAff $ P.seal channel
-          traceAnyA $ tag' <> ": _fork: killed: killing fiber..."
+          debugA $ tag' <> ": _fork: killed: killing fiber..."
           unsafeCoerceAff $ killFiber e fiber
-          traceAnyA $ tag' <> ": _fork: killed: done"
+          debugA $ tag' <> ": _fork: killed: done"
       }
       (\{ channel, fiber, fiberId } ->
-        let sagaFiber :: ∀ x. Fiber _ x -> SagaFiber input x
+        let sagaFiber :: ∀ x. Fiber _ x -> SagaFiber input' x
             sagaFiber fiber' =
               SagaFiber
                 { output: P.output channel
@@ -336,11 +341,11 @@ _fork keepAlive tag thread env (Saga' saga) = do
       )
 
 runThread
-  :: ∀ env state input input' output
+  :: ∀ env state input input' output a
    . (input -> input')
   -> P.Input input
   -> ThreadContext state input' output
-  -> Maybe (AVar _)
+  -> Maybe (AVar a)
   -> IO Unit
 runThread convert input thread completionV =
   liftAff $
@@ -350,83 +355,83 @@ runThread convert input thread completionV =
             <$> (liftEff $ launchAff pipeInputToFibers)
             <*> (liftEff $ launchAff $
                   let go fibers = do
-                        traceAnyA $ thread.tag <> ": runThread: supervisor: waiting for fibers..."
+                        debugA $ thread.tag <> ": runThread: supervisor: waiting for fibers..."
                         takeVar thread.newFiberVar >>= case _ of
                           Nothing -> do
-                            traceAnyA $ thread.tag <> ": runThread: supervisor: awaiting collected fibers..."
+                            debugA $ thread.tag <> ": runThread: supervisor: awaiting collected fibers..."
                             for_ fibers joinFiber
-                            traceAnyA $ thread.tag <> ": runThread: supervisor: end"
+                            debugA $ thread.tag <> ": runThread: supervisor: end"
                           Just (sagaFiber@SagaFiber { fiber, fiberId }) -> do
-                            traceAnyA $ thread.tag <> ": runThread: supervisor: watching fiber " <> show fiberId
+                            debugA $ thread.tag <> ": runThread: supervisor: watching fiber " <> show fiberId
                             fiber <- forkAff $
                               unsafeCoerceAff $ do
-                                traceAnyA $ thread.tag <> ": runThread: supervisor: joining fiber " <> show fiberId
+                                debugA $ thread.tag <> ": runThread: supervisor: joining fiber " <> show fiberId
                                 joinFiber fiber `catchError` \e ->
                                   unless (Error.message e == Error.message _COMPLETED_SENTINEL ||
                                           Error.message e == Error.message _CANCELED_SENTINEL) do
                                     unsafeCoerceAff $ for_ completionV $ killVar e
                                 unsafeCoerceAff $ liftEff $ unlinkFiber sagaFiber
-                                traceAnyA $ thread.tag <> ": runThread: supervisor: joined fiber " <> show fiberId
+                                debugA $ thread.tag <> ": runThread: supervisor: joined fiber " <> show fiberId
                             go (fiber A.: fibers)
                    in go []
                 )
       )
       { completed: \e { broadcastFiber, supervisionFiber } -> do
-          traceAnyA $ thread.tag <> ": runThread: completed: killing broadcast fiber"
+          debugA $ thread.tag <> ": runThread: completed: killing broadcast fiber"
           killFiber _COMPLETED_SENTINEL broadcastFiber
-          traceAnyA $ thread.tag <> ": runThread: completed: killing supervision fiber"
+          debugA $ thread.tag <> ": runThread: completed: killing supervision fiber"
           killFiber _COMPLETED_SENTINEL supervisionFiber
-          traceAnyA $ thread.tag <> ": runThread: completed: killing remaining fibers"
+          debugA $ thread.tag <> ": runThread: completed: killing remaining fibers"
           unsafeCoerceAff $ killRemainingFibers _COMPLETED_SENTINEL
-          traceAnyA $ thread.tag <> ": runThread: completed: completed"
+          debugA $ thread.tag <> ": runThread: completed: completed"
       , failed: \e { broadcastFiber, supervisionFiber } -> do
-          traceAnyA $ thread.tag <> ": runThread: failed: killing broadcast fiber"
+          debugA $ thread.tag <> ": runThread: failed: killing broadcast fiber"
           killFiber e broadcastFiber
-          traceAnyA $ thread.tag <> ": runThread: failed: killing supervision fiber"
+          debugA $ thread.tag <> ": runThread: failed: killing supervision fiber"
           killFiber e supervisionFiber
-          traceAnyA $ thread.tag <> ": runThread: failed: killing remaining fibers"
+          debugA $ thread.tag <> ": runThread: failed: killing remaining fibers"
           unsafeCoerceAff $ killRemainingFibers e
-          traceAnyA $ thread.tag <> ": runThread: failed: completed"
+          debugA $ thread.tag <> ": runThread: failed: completed"
       , killed: \e { broadcastFiber, supervisionFiber } -> do
-          traceAnyA $ thread.tag <> ": runThread: killed: killing broadcast fiber"
+          debugA $ thread.tag <> ": runThread: killed: killing broadcast fiber"
           killFiber e broadcastFiber
-          traceAnyA $ thread.tag <> ": runThread: killed: killing supervision fiber"
+          debugA $ thread.tag <> ": runThread: killed: killing supervision fiber"
           killFiber e supervisionFiber
-          traceAnyA $ thread.tag <> ": runThread: killed: killing remaining fibers"
+          debugA $ thread.tag <> ": runThread: killed: killing remaining fibers"
           unsafeCoerceAff $ killRemainingFibers e
-          traceAnyA $ thread.tag <> ": runThread: killed: completed"
+          debugA $ thread.tag <> ": runThread: killed: completed"
       }
       \{ supervisionFiber } -> do
 
-          traceAnyA $ thread.tag <> ": runThread: waiting for completion signal..."
+          debugA $ thread.tag <> ": runThread: waiting for completion signal..."
           void $ for_ completionV readVar `catchError` \e ->
             unless (Error.message e == Error.message _COMPLETED_SENTINEL ||
                     Error.message e == Error.message _CANCELED_SENTINEL) do
               throwError e
 
-          traceAnyA $ thread.tag <> ": runThread: signaling end of fibers"
+          debugA $ thread.tag <> ": runThread: signaling end of fibers"
           putVar Nothing thread.newFiberVar
-          traceAnyA $ thread.tag <> ": runThread: signaled end of fibers"
+          debugA $ thread.tag <> ": runThread: signaled end of fibers"
 
-          traceAnyA $ thread.tag <> ": runThread: waiting for supervision fiber..."
+          debugA $ thread.tag <> ": runThread: waiting for supervision fiber..."
           joinFiber supervisionFiber `catchError` \e ->
             unless (Error.message e == Error.message _COMPLETED_SENTINEL ||
                     Error.message e == Error.message _CANCELED_SENTINEL) do
               throwError e
 
-          traceAnyA $ thread.tag <> ": runThread: done"
+          debugA $ thread.tag <> ": runThread: done"
 
   where
   killRemainingFibers e = do
     fibers <- unsafeCoerceAff $ liftEff $ readRef thread.fibersRef
     for_ fibers \(SagaFiber { fiber, fiberId }) -> do
-      traceAnyA $ thread.tag <> ": runThread: killRemainingFibers: killing " <> show fiberId <> " ..."
+      debugA $ thread.tag <> ": runThread: killRemainingFibers: killing " <> show fiberId <> " ..."
       -- Note: Need to start a kill this fiber in a fresh Aff context to avoid
       --       potentially causing an error while running the finalizer.
       -- TODO: Spend more time understanding this. What are the implications?
       -- Refer: https://github.com/slamdata/purescript-aff/blob/master/src/Control/Monad/Aff.js#L502-L505
       void $ liftEff $ launchAff $ killFiber e fiber
-      traceAnyA $ thread.tag <> ": runThread: killRemainingFibers: killed " <> show fiberId <> " ..."
+      debugA $ thread.tag <> ": runThread: killRemainingFibers: killed " <> show fiberId <> " ..."
 
   unlinkFiber (SagaFiber { fiberId }) =
     modifyRef thread.fibersRef $
@@ -437,7 +442,7 @@ runThread convert input thread completionV =
     P.runEffectRec $ P.for (P.fromInput' input) \value -> do
       fibers <- liftEff $ readRef thread.fibersRef
       lift $ for_ fibers \(SagaFiber { output }) -> do
-        traceAnyA $ thread.tag <> ": runThread: sending value along"
+        debugA $ thread.tag <> ": runThread: sending value along"
         void $ forkAff $ apathize $ P.send' (convert value) output
 
 newThreadContext
@@ -541,7 +546,7 @@ newIdSupply = IdSupply <$> liftEff (newRef 0)
 nextId :: IdSupply -> IO Int
 nextId (IdSupply ref) = liftEff $ modifyRef' ref \value -> { state: value + 1, value }
 
-{-
+{-|
   Install and initialize the saga middleware.
 
   We need the `dispatch` function to run the saga, but we need the saga to get
@@ -569,7 +574,7 @@ sagaMiddleware saga = wrap $ \api ->
               runIO' do
                 idSupply  <- newIdSupply
                 threadCtx <- newThreadContext { idSupply, api: unsafeCoerce api } "root"
-                task      <- _fork true "main" threadCtx unit saga
+                task      <- _fork true "main" id (const $ pure unit) threadCtx unit saga
                 runThread id (P.input chan) threadCtx Nothing
                   `catchError` \e ->
                     let msg = maybe "" (", stack trace follows:\n" <> _) $ stack e

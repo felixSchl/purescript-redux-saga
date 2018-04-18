@@ -81,15 +81,10 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
         r <- runIO' $ withCompletionVar \done -> do
           void $ mkStore (wrap $ const id) {} do
             void $ fork do
-              traceAnyA "a"
               x <- take \i -> do
-                traceAnyA $ "I: " <> show i
                 Just (pure i)
-              traceAnyA "b"
               liftIO $ done x
-            traceAnyA "c"
             put 1
-            traceAnyA "d"
         r `shouldEqual` 1
 
       it "should ignore non-matching actions" do
@@ -244,9 +239,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
           void $ mkStore (wrap $ const id) {} do
             void $ fork do
               void $ fork do
-                traceAnyA "aaaaaaaa"
                 take $ const $ pure $ liftIO $ done true
-                traceAnyA "bbbbbbb"
             liftAff $ delay $ 10.0 # Milliseconds
             put unit
         x `shouldEqual` true
