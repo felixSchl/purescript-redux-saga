@@ -206,8 +206,6 @@ _fork
 _fork keepAlive tag thread env (Saga' saga) = do
   fiberId <- nextId thread.global.idSupply
 
-  traceAnyA $ "ASSIGNED FIBER ID: " <> show fiberId
-
   let tag' = thread.tag <> ">" <> tag <> " (" <> show fiberId <> ")"
       log :: String -> IO Unit
       log msg = debugA $ "fork (" <> tag' <> "): " <> msg
@@ -265,7 +263,7 @@ _fork keepAlive tag thread env (Saga' saga) = do
                       traceAnyA $ tag' <> ": _fork: killed: killing completionV..."
                       killVar   e completionV
                       traceAnyA $ tag' <> ": _fork: killed: complete"
-                      -- P.seal channel
+                      P.seal channel
                   }
                   \{ completionV, childThreadFiber, childThreadCtx } -> do
                     traceAnyA $ tag' <> ": _fork: evaluating saga..."
@@ -358,7 +356,7 @@ runThread convert input thread completionV =
                             traceAnyA $ thread.tag <> ": runThread: supervisor: awaiting collected fibers..."
                             for_ fibers joinFiber
                             traceAnyA $ thread.tag <> ": runThread: supervisor: end"
-                          Just (SagaFiber { fiber, fiberId }) -> do
+                          Just (sagaFiber@SagaFiber { fiber, fiberId }) -> do
                             traceAnyA $ thread.tag <> ": runThread: supervisor: watching fiber " <> show fiberId
                             fiber <- forkAff $
                               unsafeCoerceAff $ do
@@ -367,6 +365,7 @@ runThread convert input thread completionV =
                                   unless (Error.message e == Error.message _COMPLETED_SENTINEL ||
                                           Error.message e == Error.message _CANCELED_SENTINEL) do
                                     unsafeCoerceAff $ for_ completionV $ killVar e
+                                unsafeCoerceAff $ liftEff $ unlinkFiber sagaFiber
                                 traceAnyA $ thread.tag <> ": runThread: supervisor: joined fiber " <> show fiberId
                             go (fiber A.: fibers)
                    in go []
@@ -422,7 +421,11 @@ runThread convert input thread completionV =
     fibers <- unsafeCoerceAff $ liftEff $ readRef thread.fibersRef
     for_ fibers \(SagaFiber { fiber, fiberId }) -> do
       traceAnyA $ thread.tag <> ": runThread: killRemainingFibers: killing " <> show fiberId <> " ..."
-      killFiber e fiber
+      -- Note: Need to start a kill this fiber in a fresh Aff context to avoid
+      --       potentially causing an error while running the finalizer.
+      -- TODO: Spend more time understanding this. What are the implications?
+      -- Refer: https://github.com/slamdata/purescript-aff/blob/master/src/Control/Monad/Aff.js#L502-L505
+      void $ liftEff $ launchAff $ killFiber e fiber
       traceAnyA $ thread.tag <> ": runThread: killRemainingFibers: killed " <> show fiberId <> " ..."
 
   unlinkFiber (SagaFiber { fiberId }) =

@@ -358,7 +358,7 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
               liftEff (readRef ref) >>= liftIO <<< done
           r `shouldEqual` ["a:start", "b", "b", "c", "b", "b", "c", "a:done"]
 
-        itOnly "should be able to cancel forks (4)" do
+        it "should be able to cancel forks (4)" do
           r <- runIO' $ withCompletionVar \done -> do
             void $ mkStore (wrap $ const id) {} do
               ref <- liftEff $ newRef unit
@@ -392,15 +392,15 @@ main = run' (defaultConfig { timeout = Just 2000 }) [consoleReporter] do
           r `shouldEqual` unit
           liftAff $ delay $ 10.0 # Milliseconds
 
-        pending' "debounce" do
+        it "debounce" do
           x <- runIO' $ withCompletionVar \done -> do
             void $ mkStore (wrap $ const id) {} do
               ref <- liftEff $ newRef 0
 
-              -- void $ fork $
-              --   debounce (100.0 # Milliseconds) $
-              --     const $ Just do
-              --       liftEff $ modifyRef ref (_ + 1)
+              void $ fork $
+                debounce (100.0 # Milliseconds) $
+                  const $ Just do
+                    liftEff $ modifyRef ref (_ + 1)
 
               put unit
               liftAff $ delay $ 10.0 # Milliseconds
