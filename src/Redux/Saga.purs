@@ -1,5 +1,7 @@
 module Redux.Saga
   ( sagaMiddleware
+
+  -- * types
   , Saga
   , Saga'
   , SagaPipe
@@ -9,6 +11,8 @@ module Redux.Saga
   , KeepAlive
   , Label
   , GlobalState
+
+  -- * combinators
   , take
   , takeLatest
   , fork
@@ -69,20 +73,28 @@ debugA :: ∀ a b. Show b => Applicative a => b -> a Unit
 debugA _ = pure unit
 -- debugA = traceAnyA
 
-_NOT_IMPLEMENTED_ERROR :: Error
-_NOT_IMPLEMENTED_ERROR = error "NOT_IMPLEMENTED"
-
 _COMPLETED_SENTINEL :: Error
 _COMPLETED_SENTINEL = error "REDUX_SAGA_COMPLETED"
 
 _CANCELED_SENTINEL :: Error
 _CANCELED_SENTINEL = error "REDUX_SAGA_CANCELLED"
 
+type KeepAlive = Boolean
+type Label = String
+
+-- | A name tag assigned to a saga
+type NameTag = String
+
+-- | A function to emit values into a channel
 type Emitter input = input -> IO Unit
 
+-- | Forks a new saga, providing the caller with an `Emitter`, allowing them to
+-- | inject arbitrary values into the forked saga. To discern between upstream
+-- | values and injected values, values are tagged `Left` and `Right`
+-- | respectively.
 channel
   :: ∀ env input input' action state a eff
-   . String
+   . NameTag
   -> (Emitter input' -> IO Unit)
   -> Saga' env state (Either input input') action a
   -> Saga' env state input action (SagaFiber input a)
@@ -95,6 +107,24 @@ channel tag createEmitter saga =
       liftIO $
         _fork false tag Left emitter thread env saga
 
+-- | `take` blocks to receive an input value for which the given function
+-- | returns `Just` a saga to execute. This saga is then executed on the same
+-- | thread, blocking until it finished running.
+-- |
+-- | #### Example
+-- |
+-- | ``` purescript
+-- | data Action = SayFoo | SayBar
+-- |
+-- | sayOnlyBar
+-- |   :: ∀ env state Action Action
+-- |    . Saga' env state Action Action Unit
+-- | sayOnlyBar = do
+-- |   take case _ of
+-- |     SayFoo -> Nothing
+-- |     SayBar -> Just do
+-- |       liftEff $ Console.log "Bar!"
+-- | ```
 take
   :: ∀ env state input output a
    . (input -> Maybe (Saga' env state input output a))
@@ -105,6 +135,8 @@ take f = go
     Just saga -> saga
     Nothing   -> go
 
+-- | Similar to `take` but runs indefinitely, replacing previously spawned tasks
+-- | with new ones.
 takeLatest
   :: ∀ env state input output a
    . (input -> Maybe (Saga' env state input output a))
@@ -118,6 +150,28 @@ takeLatest f = go Nothing
     Nothing ->
       go mTask
 
+-- | `put` emits an `output` which gets dispatched to your redux store and in
+-- | turn becomes available to sagas.
+-- |
+-- | #### Example
+-- |
+-- | ``` purescript
+-- | data Action = SayFoo | SayBar
+-- |
+-- | sayOnlyBar
+-- |   :: ∀ env state
+-- |    . Saga' env state Action Action Unit
+-- | sayOnlyBar = do
+-- |
+-- |   put SayBar -- ^ trigger a `SayBar` action right away.
+-- |
+-- |   take case _ of
+-- |     SayFoo -> Nothing
+-- |     SayBar -> Just do
+-- |       liftEff $ Console.log "Bar!"
+-- |
+-- | -- >> Bar!
+-- | ```
 put
   :: ∀ env input action state
    . action
@@ -126,6 +180,26 @@ put action = Saga' do
   liftAff $ delay $ 0.0 # Milliseconds
   P.yield action
 
+-- | `joinTask` blocks until a given `SagaTask` returns.
+-- |
+-- | *NOTE:* Canceling the joining of a task will also cancel the task itself.
+-- |
+-- | #### Example
+-- |
+-- | ``` purescript
+-- | helloWorld
+-- |   :: ∀ env state input output
+-- |    . Saga' env state input output Unit
+-- | helloWorld = do
+-- |   task <- fork $ do
+-- |     liftAff $ delay $ 10000.0 # Milliseconds
+-- |     liftAff $ Console.log "World!"
+-- |   joinTask task
+-- |   liftEff $ Console.log "Hello"
+-- |
+-- | -- >> World!
+-- | -- >> Hello
+-- | ```
 joinTask
   :: ∀ env state input output a eff
    . SagaFiber _ a
@@ -138,6 +212,23 @@ joinTask (SagaFiber { fiber, fiberId }) =
         killFiber e fiber
       )
 
+-- | `cancelTask` cancels a given `SagaTask`.
+-- |
+-- | #### Example
+-- |
+-- | ``` purescript
+-- | helloWorld
+-- |   :: ∀ env state input output
+-- |    . Saga' env state input output Unit
+-- | helloWorld = do
+-- |   task <- fork $ do
+-- |     liftAff $ delay $ 10000.0 # Milliseconds
+-- |     liftAff $ Console.log "World!"
+-- |   cancelTask task
+-- |   liftEff $ Console.log "Hello"
+-- |
+-- | -- >> Hello
+-- | ```
 cancelTask
   :: ∀ env state input output a eff
    . SagaFiber _ a
@@ -145,6 +236,20 @@ cancelTask
 cancelTask (SagaFiber { fiber }) = void $
   liftAff $ killFiber _CANCELED_SENTINEL fiber
 
+-- | `select` gives access the the current application state and it's output
+-- | varies over time as the application state changes.
+-- |
+-- | #### Example
+-- |
+-- | ``` purescript
+-- | printState
+-- |   :: ∀ env state input output
+-- |   => Show state
+-- |    . Saga' env state input output Unit
+-- | printState = do
+-- |   state <- select
+-- |   liftAff $ Console.log $ show state
+-- | ```
 select
   :: ∀ env state input output a
    . Saga' env state input output state
@@ -152,6 +257,32 @@ select = do
   _ /\ { global: { api } } <- Saga' (lift ask)
   liftEff api.getState
 
+-- | `localEnv` runs a saga in a modified environment. This allows us to combine
+-- | sagas in multiple environments. For example, we could write sagas that
+-- | require access to certain values like account information without worrying
+-- | about "how" to manually pass those values along.
+-- |
+-- | #### Example
+-- |
+-- | ``` purescript
+-- | printEnv
+-- |   :: ∀ env state input output
+-- |   => Show env
+-- |    . Saga' env state input output Unit
+-- | printEnv = do
+-- |   env <- ask
+-- |   liftEff $ Console.log $ show env
+-- |
+-- | saga
+-- |   :: ∀ env state input output
+-- |    . Saga' env state input output Unit
+-- | saga = do
+-- |   localEnv (const "Hello") printEnv
+-- |   localEnv (const "World!") printEnv
+-- |
+-- | -- >> Hello
+-- | -- >> World!
+-- | ```
 localEnv
   :: ∀ env env2 state input output a
    . (env -> env2)
@@ -161,12 +292,36 @@ localEnv f saga = do
   env <- ask
   joinTask =<< fork' (f env) saga
 
+-- | `fork` puts a saga in the background
+-- |
+-- | #### Example
+-- |
+-- | ``` purescript
+-- | helloWorld
+-- |   :: ∀ env state input output
+-- |    . Saga' env state input output Unit
+-- | helloWorld = do
+-- |   fork $ do
+-- |     liftAff $ delay $ 10000.0 # Milliseconds
+-- |     liftAff $ Console.log "World!"
+-- |   liftEff $ Console.log "Hello"
+-- |
+-- | -- >> Hello
+-- | -- >> World!
+-- | ```
+-- |
+-- | `fork` returns a `SagaTask a`, which can later be joined using `joinTask` or
+-- | canceled using `cancelTask`.
+-- |
+-- | **important**: A saga thread won't finish running until all attached forks have
+-- | finished running!
 fork
   :: ∀ env state input output a eff
    . Saga' env state input output a
   -> Saga' env state input output (SagaFiber input a)
 fork = forkNamed "anonymous"
 
+-- | Same as `fork`, but allows setting a custom environment
 fork'
   :: ∀ env newEnv state input output a eff
    . newEnv
@@ -174,15 +329,17 @@ fork'
   -> Saga' env state input output (SagaFiber input a)
 fork' = forkNamed' "anonymous"
 
+-- | Same as `fork`, but allows setting a name tag
 forkNamed
   :: ∀ env state input output a eff
-   . String
+   . NameTag
   -> Saga' env state input output a
   -> Saga' env state input output (SagaFiber input a)
 forkNamed tag saga = do
   env <- ask
   forkNamed' tag env saga
 
+-- | Same as `fork'`, but allows setting a name tag
 forkNamed'
   :: ∀ env newEnv state input output a eff
    . String
@@ -192,9 +349,6 @@ forkNamed'
 forkNamed' tag env saga = do
   _ /\ thread <- Saga' (lift ask)
   liftIO $ _fork false tag id (const $ pure unit) thread env saga
-
-type KeepAlive = Boolean
-type Label = String
 
 -- | Fork a saga off the current thread.
 -- We must be sure to safely acquire a new fibre and advertise it to the thread
@@ -487,8 +641,120 @@ newThreadContext global tag =
     <$> (liftEff $ newRef [])
     <*> (liftAff makeEmptyVar)
 
+-- | Simplified `Saga'` alias where the input and output is the same.
 type Saga env state action a = Saga' env state action action a
 
+-- | The `Saga` monad is an opinionated, closed monad with a range of
+-- | functionality.
+-- |
+-- |                read-only environment, accessible via `MonadAsk` instance
+-- |                /   your state container type (reducer)
+-- |                |    /    the type this saga consumes (i.e. actions)
+-- |                |    |     /    the type of output this saga produces (i.e. actions)
+-- |                |    |     |     /    the return value of this Saga
+-- |                |    |     |     |     /
+-- | newtype Saga' env state input output a = ...
+-- |
+-- | ### The `env` parameter
+-- |
+-- | The `env` parameter gives us access to a read-only environment, accessible via
+-- | `MonadAsk` instance. Forked computations have the opportunity to change this
+-- | environment for the execution of the fork without affecting the current thread's
+-- | `env`.
+-- |
+-- | ``` purescript
+-- | type MyConfig = { apiUrl :: String }
+-- |
+-- | logApiUrl :: ∀ state input output. Saga' MyConfig state input output Unit
+-- | logApiUrl = void do
+-- |     { apiUrl } <- ask
+-- |     liftIO $ Console.log apiUrl
+-- | ```
+-- |
+-- | ### The `state` parameter
+-- |
+-- | The `state` parameter gives us read access to the current application state via
+-- | the `select` combinator. This value may change over time.
+-- |
+-- | ``` purescript
+-- | type MyState = { currentUser :: String }
+-- |
+-- | logUser :: ∀ env input output. Saga' env MyState input output Unit
+-- | logUser = void do
+-- |     { currentUser } <- select
+-- |     liftIO $ Console.log currentUser
+-- | ```
+-- |
+-- | ### The `input` parameter
+-- |
+-- | The `input` parameter denotes the type of input this saga consumes. This in
+-- | combination with the `output` parameter exposes sagas for what they naturally
+-- | are: pipes consuming `input` and producing `output`. Typically this input type
+-- | would correspond to your application's actions type.
+-- |
+-- | ``` purescript
+-- | data MyAction
+-- |   = LoginRequest Username Password
+-- |   | LogoutRequest
+-- |
+-- | loginFlow :: ∀ env state output. Saga' env state MyAction MyAction Unit
+-- | loginFlow = forever do
+-- |   take case _ of
+-- |     LoginRequest user pw -> do
+-- |       ...
+-- |     _ -> Nothing -- ignore other actions
+-- | ```
+-- |
+-- | ### The `output` parameter
+-- |
+-- | The `output` parameter denotes the type of output this saga produces. Typically
+-- | this input type would correspond to your application's actions type. The
+-- | `output` sagas produce is fed back into redux cycle by dispatching it to the
+-- | store.
+-- |
+-- | ``` purescript
+-- | data MyAction
+-- |   = LoginRequest Username Password
+-- |   | LogoutSuccess Username
+-- |   | LogoutFailure Error
+-- |   | LogoutRequest
+-- |
+-- | loginFlow :: ∀ env state. Saga' env state MyAction MyAction Unit
+-- | loginFlow = forever do
+-- |   take case _ of
+-- |     LoginRequest user pw -> do
+-- |       liftAff (attempt {- some I/O -}) >>= case _ of
+-- |         Left err -> put $ LoginFailure err
+-- |         Right v  -> put $ LoginSuccess user
+-- |     _ -> Nothing -- ignore other actions
+-- | ```
+-- |
+-- | ### The `a` parameter
+-- |
+-- | The `a` parameter allows every saga to return a value, making it composable.
+-- | Here's an example of a contrived combinator
+-- |
+-- | ``` purescript
+-- | type MyAppConf = { apiUrl :: String }
+-- | type Account = { id :: String, email :: String }
+-- |
+-- | getAccount
+-- |   :: ∀ state input output
+-- |     . String
+-- |   -> Saga' MyAppConf state input output Account
+-- | getAccount id = do
+-- |   { apiUrl } <- ask
+-- |   liftAff (API.getAccounts apiUrl)
+-- |
+-- | -- later ...
+-- |
+-- | saga
+-- |   :: ∀ state input output
+-- |    . Saga' MyAppConf state input output Unit
+-- | saga = do
+-- |   account <- getAccount "123-dfa-123"
+-- |   liftEff $ Console.log $ show account.email
+-- | ```
 newtype Saga' env state input output a
   = Saga' (
       P.Pipe
@@ -508,6 +774,8 @@ derive newtype instance monadRecSaga :: MonadRec (Saga' env state input action)
 derive newtype instance monadThrowSaga :: MonadThrow Error (Saga' env state input action)
 derive newtype instance monadErrorSaga :: MonadError Error (Saga' env state input action)
 
+-- | Races two sagas in parallel
+-- | The losing saga will be canceled via `cancelTask`
 instance altSaga :: Alt (Saga' env state input action) where
   alt s1 s2 = do
     t1@(SagaFiber { fiber: f1 }) <- forkNamed "L" s1
@@ -587,7 +855,7 @@ nextId (IdSupply ref) = liftEff $ modifyRef' ref \value -> { state: value + 1, v
 
   Since this has to integrate with react-redux, there's no way to avoid this
   and "redux-saga" does the equivalent hack in it's codebase.
- -}
+-}
 sagaMiddleware
   :: ∀ action state eff
    . Saga' Unit state action action Unit
