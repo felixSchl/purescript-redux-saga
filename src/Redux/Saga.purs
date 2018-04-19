@@ -57,7 +57,7 @@ import Data.Tuple (fst)
 import Data.Tuple.Nested ((/\), type (/\))
 import Pipes ((>->))
 import Pipes (await, for, yield) as P
-import Pipes.Aff (Input, Output, fromInput, fromInput', input, output, realTime, seal, send, send', spawn) as P
+import Pipes.Aff (Input, Output, fromInput, fromInput', input, output, realTime, seal, send, send', spawn, kill) as P
 import Pipes.Core (Pipe, runEffectRec) as P
 import React.Redux as Redux
 import Unsafe.Coerce (unsafeCoerce)
@@ -271,9 +271,10 @@ _fork keepAlive tag convert inject thread env (Saga' saga) = do
                       debugA $ tag' <> ": _fork: completed: killing user channel piping fiber..."
                       killFiber _COMPLETED_SENTINEL userChannelPipingFiber
                       debugA $ tag' <> ": _fork: completed: sealing channel..."
-                      -- P.seal channel
+                      P.kill _COMPLETED_SENTINEL channel
+                      P.kill _COMPLETED_SENTINEL channel_1
+                      P.kill _COMPLETED_SENTINEL channel_2
                       debugA $ tag' <> ": _fork: completed: complete"
-
                   , failed: \e ({ completionV, childThreadFiber, channelPipingFiber, userChannelPipingFiber }) -> do
                       debugA $ tag' <> ": _fork: failed: killing child thread fiber..."
                       killFiber e childThreadFiber
@@ -284,7 +285,9 @@ _fork keepAlive tag convert inject thread env (Saga' saga) = do
                       debugA $ tag' <> ": _fork: failed: killing completionV..."
                       killVar   e completionV
                       debugA $ tag' <> ": _fork: failed: complete"
-                      -- P.seal channel
+                      P.kill e channel
+                      P.kill e channel_1
+                      P.kill e channel_2
                   , killed: \e ({ completionV, childThreadFiber, channelPipingFiber, userChannelPipingFiber }) -> do
                       debugA $ tag' <> ": _fork: killed: killing child thread fiber..."
                       killFiber e childThreadFiber
@@ -295,7 +298,9 @@ _fork keepAlive tag convert inject thread env (Saga' saga) = do
                       debugA $ tag' <> ": _fork: killed: killing completionV..."
                       killVar   e completionV
                       debugA $ tag' <> ": _fork: killed: complete"
-                      P.seal channel
+                      P.kill e channel
+                      P.kill e channel_1
+                      P.kill e channel_2
                   }
                   \{ completionV, childThreadFiber, childThreadCtx } -> do
                     debugA $ tag' <> ": _fork: evaluating saga..."

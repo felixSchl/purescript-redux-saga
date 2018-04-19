@@ -4,9 +4,9 @@ import Prelude
 import Redux.Saga
 
 import Control.Alt (class Alt, (<|>))
-import Control.Monad.Aff (bracket, catchError, delay, forkAff, joinFiber, killFiber, supervise, throwError)
+import Control.Monad.Aff (apathize, bracket, catchError, delay, forkAff, invincible, joinFiber, killFiber, supervise, throwError)
 import Control.Monad.Aff as Error
-import Control.Monad.Aff.AVar (makeEmptyVar, takeVar, putVar)
+import Control.Monad.Aff.AVar (killVar, makeEmptyVar, putVar, takeVar)
 import Control.Monad.Aff.Class (liftAff)
 import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Class (liftEff)
